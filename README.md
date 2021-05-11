@@ -4,7 +4,9 @@ Designing, assembling, programming and testing an ultra-low-cost GPS-disciplined
 Keywords: STM32, GPS, GPSDO, crystal oscillator, frequency standard, atomic clock
 
 André Balsa, April 2021
+
 The Project
+===========
 
 I decided to build my own version of a 10MHz GPSDO with the following features:
 - Very low cost i.e. < 30 euros ($35), short and easily purchased BOM.
