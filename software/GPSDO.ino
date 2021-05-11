@@ -1,153 +1,138 @@
-/*
-  GPSDO V.001m
-  First attempt at Bluetooth interface using HardwareSerial Serial6
-  OCXO frequency measurement actually WORKS!
-  10s, 100s averages WORK!
-  Discards bad fcounts, avoids counter wraparound
-  Code cleanup / beautifying (much more needed)
-  Timer interrupt, various sensors, I2C MCP4725 12-bit DAC, and GPS read basic
-  This version adds OCXO frequency moving average over 10 seconds, 100 seconds
-  and 1000 seconds, making good use of the ample 128kB RAM available
-  in the STM32F411CEU6 MCU.
-  Preparing to close the loop...
+/*******************************************************************************************************
+  GPSDO by André Balsa, May 2021
+  reuses excellent code by Stuart Robinson - 05/04/20
 
-  Display:
-    - SSD1306 128x64 I2C OLED display and uptime clock
-    - U8x8 library, which does not lock up even after many hours
+  This program is supplied as is, it is up to the user of the program to decide if the program is
+  suitable for the intended purpose and free from errors.
+*******************************************************************************************************/
 
-  I2C sensors:
-    - AHT10 temperature humidity sensor using AdaFruit AHTX0 library
+// GPSDO with optional I2C SSD1306 display, Hardware Serial on STM32 MCU
 
-  SPI sensors:
-    - BMP280 using PA4
+/*******************************************************************************************************
+  Program Operation -  This program is a portable GPS checker with display option. It uses an SSD1306 or
+  SH1106 128x64 I2C OLED display. It reads the GPS for 5 seconds and copies the characters from the GPS
+  to the serial monitor, this is an example printout from a working GPS that has just been powered on;
+   
+  GPSDO Starting
+  Wait GPS Fix 5 seconds
+  Timeout - No GPS Fix 5s
+  Wait GPS Fix 5 seconds
+  $PGACK,103*40
+  $PGACK,105*46
+  $PMTK011,MTKGPS*08
+  $PMTK010,001*2E
+  $PMTK010,00æ*2D
+  $GPGGA,235942.800,,,,,0,0,,,M,,M,,*4B
+  $GPGSA,A,1,,,,,,,,,,,,,,,*1E
+  $GPRMC,235942.800,V,,,,,0.00,0.00,050180,,,N*42
+  $GPVTG,0.00,T,,M,0.00,N,0.00,K,N*32
+  $GPGSV,1,1,03,30,,,43,07,,,43,05,,,38*70
 
-  Internal sensors:
-    - VREF
-    - VBAT
-    - TEMP
-  
-  Uses TinyGPS++ library to read GPS data and report position, date and UTC time on USB serial
+  Timeout - No GPS Fix 5s
+  Wait GPS Fix 5 seconds
 
-  Assumes GPS RX and TX are connected to UART1 (pins A9-TX1 and A10-RX1 on Black Pill MCU).
+  That printout is from a Meadiatek GPS, the Ublox ones are similar. The data from the GPS is also fed into
+  the TinyGPS++ library and if there is no fix a message is printed on the serial monitor.
 
-  Note the use of custom fields because Neo-8M module differs from Neo-6M module and sends
-  non-standard NMEA sequences
-  
-  Also this sketch shows how to configure HardwareTimer to execute an interrupt service routine
-  at regular intervals. ISR toggles pin.
-  Once configured, there is only CPU load for ISRs.
-  
-*/
+  When the program detects that the GPS has a fix, it prints the Latitude, Longitude, Altitude, Number
+  of satellites in use, the HDOP value, time and date to the serial monitor. If the I2C OLED display is
+  attached that is updated as well. Display is assumed to be on I2C address 0x3C.
 
-// Includes
-// --------
+  Serial monitor baud rate is set at 115200.
+*******************************************************************************************************/
+
+
+
+/*******************************************************************************************************
+  Program Operation -  This program is a portable GPS checker and display. It uses an SSD1306 or SH1106
+  128x64 I2C OLED display. At startup the program starts checking the data coming from the GPS for a
+  valid fix. It reads the GPS for 5 seconds and if there is no fix, prints a message on the serial monitor
+  and updates the seconds without a fix on the display. During this time the data coming from the GPS is
+  copied to the serial monitor also.
+
+  When the program detects that the GPS has a fix, it prints the Latitude, Longitude, Altitude, Number
+  of satellites in use, the HDOP value, time and date to the serial monitor. If the I2C OLED display is
+  attached that is updated as well. Display is assumed to be on I2C address 0x3C.
+
+  Serial monitor baud rate is set at 115200.
+*******************************************************************************************************/
+
+#define Program_Name "GPSDO"
+#define Program_Version "v0.02c"
+#define authorname "André Balsa reusing code from Stuart Robinson"
 
 #if !defined(STM32_CORE_VERSION) || (STM32_CORE_VERSION  < 0x02000000)
 #error "Due to API change, this sketch is compatible with STM32_CORE_VERSION  >= 0x02000000"
 #endif
 
-#include <TinyGPS++.h>
+#include <TinyGPS++.h>                             // get library here > http://arduiniana.org/libraries/tinygpsplus/
+TinyGPSPlus gps;                                   // create the TinyGPS++ object
 
-// I2C sensor and DAC
-#include <Wire.h>
-#include <Adafruit_AHTX0.h>
-#include <Adafruit_MCP4725.h>
+#include <Wire.h>                                  // Hardware I2C library on STM32
 
-// BMP280 - SPI
-#include <SPI.h>
-#include <Adafruit_BMP280.h>
+#include <U8x8lib.h>                                      // get library here >  https://github.com/olikraus/u8g2 
+U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for standard 0.96" SSD1306
 
-// Internal sensors
-// #include "stm32yyxx_ll_adc.h" // redundant include, not required
-
-// OLED Display
-#include <U8x8lib.h>
-
-// Objects and variables
-// ---------------------
-
-//  UART               RX   TX
-HardwareSerial Serial2(PA3, PA2);   // Serial to Bluetooth module
-
-TinyGPSPlus gps;  // GPS object
-
-// U8g2 Constructor - hardware I2C, U8x8 API, no reset pin
-U8X8_SSD1306_128X64_NONAME_HW_I2C u8x8(/* reset=*/ U8X8_PIN_NONE); 
-
-const int VctlInputPin = PB0; // read Vctl on PB0 analog input pin
-
-Adafruit_AHTX0 aht;
+#include <Adafruit_MCP4725.h>                      // MCP4725 Adafruit library
 Adafruit_MCP4725 dac;
-
-#define BMP280_CS   (PA4)
-Adafruit_BMP280 bmp(BMP280_CS);        // hardware SPI, use PA4 as Chip Select
-const uint16_t PressureOffset = 1350;  // that offset must be calculated for your sensor/location
-
-#define blueledpin  PC13    // Blue user LED is on PC13 on STM32F411CEU6 Black Pill
-#define yellow_led_pin PB1  // Yellow LED on PB1
-
-volatile int yellow_led_state = 2;  // global variable 0=off 1=on 2=1Hz blink
-
-volatile float ocxo_current = 0;
-
 const uint16_t default_DAC_output = 2593; // this varies from OCXO to OCXO
 uint16_t adjusted_DAC_output;             // we adjust this value to close the frequency locked loop
 volatile bool must_adjust_DAC = false;
 
-volatile uint8_t  hours = 0;
-volatile uint8_t  minutes = 0;
-volatile uint8_t  seconds = 0;
-volatile uint16_t days = 0;
+#define VctlInputPin PB0
+int adcVctl = 0;                      // Vctl read by ADC pin PB0
+
+// LEDs
+
+// Blue onboard LED blinks to indicate ISR is working
+#define blueledpin  PC13    // Blue onboard LED is on PC13 on STM32F411CEU6 Black Pill
+
+// Yellow extra LED is off, on or blinking to indicate some GPSDO status
+#define yellowledpin PB1   // Yellow LED on PB1
+volatile int yellow_led_state = 2;  // global variable 0=off 1=on 2=1Hz blink
+
+
+// GPS data
+float GPSLat;                                      // Latitude from GPS
+float GPSLon;                                      // Longitude from GPS
+float GPSAlt;                                      // Altitude from GPS
+uint8_t GPSSats;                                   // number of GPS satellites in use
+uint32_t GPSHdop;                                  // HDOP from GPS
+uint8_t hours, mins, secs, day, month;
+uint16_t year;
+uint32_t startGetFixmS;
+uint32_t endFixmS;
+
+// Uptime data
+volatile uint8_t  uphours = 0;
+volatile uint8_t  upminutes = 0;
+volatile uint8_t  upseconds = 0;
+volatile uint16_t updays = 0;
 volatile bool halfsecond = false;
-volatile char GPSStr[3] = "00";
-volatile char SecondsStr[3] = "00";
-volatile char minutesStr[3] = "00";
-volatile char hoursStr[3] = "00";
-
-volatile bool gpsLock = false;
-volatile uint32_t sats = 0;
-char uptime[9] = "00:00:00";
-char updays[9] = "000 days";
-char GMTtime[9] = "00:00:00";
-
-/* Internal sensor contants
-   Values available in datasheet
- */
-#define CALX_TEMP 25
-#define V25       760
-#define AVG_SLOPE 2500
-#define VREFINT   1210
-
-/* Analog read resolution */
-#define LL_ADC_RESOLUTION LL_ADC_RESOLUTION_12B
-#define ADC_RANGE 4096
 
 /* OCXO frequency measurement */
 volatile uint32_t fcount=0, previousfcount=0, calcfreqint=10000000;
-uint32_t channel;
 
-/* Moving average stuff
-   Basically we store the counter captures for 10, 100 and 1000 seconds.
+/* Moving average frequency variables
+   Basically we store the counter captures for 10 and 100 seconds.
    When the buffers are full, the average frequency is quite simply
    the difference between the oldest and newest data divided by the size
    of the buffer.
    Each second, when the buffers are full, we overwrite the oldest data
-   with the newest data and recalculate each average frequency.
+   with the newest data and calculate each average frequency.
  */
 volatile uint32_t circbuf_ten[11]; // 10+1 seconds circular buffer
 volatile uint32_t circbuf_hun[101]; // 100+1 seconds circular buffer
-// volatile uint32_t circbuf_tho[1000]; // 1000 seconds circular buffer
+
 volatile uint32_t cbiten_newest=0; // index to oldest, newest data
 volatile uint32_t cbihun_newest=0;
-// volatile uint32_t cbitho_newest=0;
-volatile bool cbTen_full=false, cbHun_full=false; //, cbTho_full=false; // flag when buffer full
-double avgften, avgfhun; //, avgftho; // average frequency calculated once the buffer is full
+
+volatile bool cbTen_full=false, cbHun_full=false;  // flag when buffer full
+double avgften, avgfhun; // average frequency calculated once the buffer is full
 
 
 // Interrupt Service Routine for the 2Hz timer
-// -------------------------------------------
-
-void Update_IT_callback(void) // WARNING! Do not attempt I2C communication inside the ISR
+void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the ISR
 
 { // Toggle pin. 2hz toogle --> 1Hz pulse, perfect 50% duty cycle
   digitalWrite(blueledpin, !digitalRead(blueledpin));
@@ -174,50 +159,44 @@ void Update_IT_callback(void) // WARNING! Do not attempt I2C communication insid
     cbTen_full=false; cbHun_full=false; // we also need to refill the ring buffers
     cbiten_newest=0; cbihun_newest=0;
     previousfcount = 0;
-  }
-                            
+  }                           
 
   switch (yellow_led_state)
   {
     case 0:
       // turn off led
-      digitalWrite(yellow_led_pin, LOW);
+      digitalWrite(yellowledpin, LOW);
       break;
     case 1:
       // turn on led
-      digitalWrite(yellow_led_pin, HIGH);
+      digitalWrite(yellowledpin, HIGH);
       break;
     case 2:
       // blink led
-      digitalWrite(yellow_led_pin, !digitalRead(yellow_led_pin));
+      digitalWrite(yellowledpin, !digitalRead(yellowledpin));
       break;
     default:
       // default is to turn off led
-      digitalWrite(yellow_led_pin, LOW);
+      digitalWrite(yellowledpin, LOW);
       break; 
   }
   
-  // uptime clock - in days, hours, minutes, seconds
+  // Uptime clock - in days, hours, minutes, seconds
   if (halfsecond)
   {
-      if (++seconds > 59)
+      if (++upseconds > 59)
       {
-          seconds = 0;
-          if (++minutes > 59)
+          upseconds = 0;
+          if (++upminutes > 59)
           {
-              minutes = 0;
-              if (++hours > 23)
+              upminutes = 0;
+              if (++uphours > 23)
               {
-                  hours = 0;
-                  ++days;
-                  //if (days = 1) printOneDay();
-                  //else printDays();  
+                  uphours = 0;
+                  ++updays;
               }
-              // printHours();
           }
-          // printMinutes();
       }
-      // printSeconds();
   }  
 }
 
@@ -237,102 +216,61 @@ void logfcount() // called once per second from ISR to update all the ring buffe
      cbHun_full=true; // that only needs to happen once, when the buffer fills up for the first time
      cbihun_newest = 0;   // (wrap around)
   }
-  // 1000 seconds buffer
-/*  circbuf_tho[cbitho_newest]=fcount;
-  cbitho_newest++;
-  if (cbitho_newest > 9) {
-     cbTho_full=true; // that only needs to happen once, when the buffer fills up for the first time
-     cbitho_newest = 0;   // (wrap around)
-  } */
 }
 
-// Setup
-// -----
 
 void setup()
 {
-  adjusted_DAC_output = default_DAC_output; // initial DAC value
+  // Setup 2Hz Timer
+  HardwareTimer *tim2Hz = new HardwareTimer(TIM9);
   
-  TIM_TypeDef *Instance = TIM9;  // tested with TIM3, TIM11, TIM9 on STM32F411CEU6 Black Pill board
-
-  // Instantiate HardwareTimer object. Thanks to 'new' instanciation, HardwareTimer is not destructed when setup() function is finished.
-  HardwareTimer *MyTim = new HardwareTimer(Instance);
-
   // configure blueledpin in output mode
   pinMode(blueledpin, OUTPUT);
 
   // configure yellow_led_pin in output mode
-  pinMode(yellow_led_pin, OUTPUT);
+  pinMode(yellowledpin, OUTPUT);    
   
-  MyTim->setOverflow(2, HERTZ_FORMAT); // 2 Hz
-  MyTim->attachInterrupt(Update_IT_callback);
-  MyTim->resume();
+  tim2Hz->setOverflow(2, HERTZ_FORMAT); // 2 Hz
+  tim2Hz->attachInterrupt(Timer_ISR_2Hz);
+  tim2Hz->resume();
 
-  Serial1.begin(9600);  // serial to GPS module
-  Serial2.begin(9600);  // serial to Bluetooth module
-  
+  // Setup serial interfaces
+  Serial1.begin(9600);  // Hardware serial to GPS module
   Serial.begin(115200); // USB serial
 
-  Serial.print(F("Testing TinyGPS++ library v. ")); Serial.println(TinyGPSPlus::libraryVersion());
-  Serial.println(F("by Mikal Hart"));
-  Serial.println();  
-  
-  Serial.println("Waiting for GPS signal acquisition (30 seconds to 15 minutes)...");
+  Serial.println();
+  Serial.print(F(__TIME__));
+  Serial.print(F(" "));
+  Serial.println(F(__DATE__));
+  Serial.println(F(Program_Name));
+  Serial.println(F(Program_Version));
+  Serial.println();
 
-  // u8x8 library initializes I2C hardware interface
-  u8x8.setBusClock(400000L); // try to avoid display locking up
-  u8x8.begin();
-  // u8x8.setPowerSave(0);
- 
+  // Setup OLED I2C display
+  // Note that u8x8 library initializes I2C hardware interface
+  disp.setBusClock(400000L); // try to avoid display locking up
+  disp.begin();
+  disp.setFont(u8x8_font_chroma48medium8_r);
+  disp.clear();
+  disp.setCursor(0, 0);
+  disp.print(F("GPSDO - v0.02c"));
+
+  // Initialize I2C again (not sure this is needed, though)
   Wire.begin();
   // try setting a higher I2C clock speed
-  Wire.setClock(400000L);
-  Serial.println("\nI2C DAC MCP4725 and read voltage on PA2");
+  Wire.setClock(400000L);  
 
-  // DAC initialization
+  // Setup I2C DAC, read voltage on PA2
+  adjusted_DAC_output = default_DAC_output; // initial DAC value
   dac.begin(0x60);
   // Output Vctl to DAC, but do not write to DAC EEPROM 
-  dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096 so 2048 should be 1/2 Vdd = approx. 1.65V    
-    
+  dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096 so 2048 should be 1/2 Vdd = approx. 1.65V
   analogReadResolution(12); // make sure we read 12 bit values
 
-  if (! aht.begin()) {
-    Serial.println("Could not find AHT10? Check wiring");
-    while (1) delay(10);
-  }
-  Serial.println("AHT10 found");
+  Serial.println(F("GPSDO Starting"));
+  Serial.println();
 
-  // generate a test 2kHz square wave on PB9 PWM pin
-  analogWriteFrequency(2000); // default PWM frequency is 1kHz, change it to 2kHz
-  analogWrite(PB9, 127); // 127 means 50% duty cycle so a square wave
-
-  // Finally: initialize BMP280
-  if (!bmp.begin()) {
-    Serial.println(F("Could not find a valid BMP280 sensor, check wiring or "
-                      "try a different address!"));
-    while (1) delay(10);
-  }
-
-  // Default settings from datasheet.
-  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
-                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
-                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
-                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
-                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
-
-  // nothing required for internal sensors
-
-  // SSD1306 I2C OLED display setup
-  u8x8.setFont(u8x8_font_chroma48medium8_r);
-  // u8x8.setFont(u8x8_font_pressstart2p_f); // for some reason using this font locks up the display
-  u8x8.drawString(0,0,"GPSDO - V.001m");
-  u8x8.drawString(0,1,"F:            Hz");
-  u8x8.drawString(0,2,"Uptime     days");
-  u8x8.drawString(2,3,"00:00:00");
-  u8x8.drawString(0,4,"GPS Lock Sats XX");
-  u8x8.drawString(0,5,"Date");
-  u8x8.drawString(0,6,"GMT time");
-  u8x8.drawString(0,7,"T     C  ctl V");
+  startGetFixmS = millis();
 
   // Setup and start Timer 2 which measures OCXO frequency
   
@@ -344,10 +282,10 @@ void setup()
   // to latch counter value on rising edge
 
   // Instantiate HardwareTimer object. Thanks to 'new' instantiation, HardwareTimer is not destructed when setup() function is finished.
-  MyTim = new HardwareTimer(TIM2);
+  HardwareTimer *FreqMeasTim = new HardwareTimer(TIM2);
   
   // Configure rising edge detection to measure frequency
-  MyTim->setMode(3, TIMER_INPUT_CAPTURE_RISING, PB10);
+  FreqMeasTim->setMode(3, TIMER_INPUT_CAPTURE_RISING, PB10);
 
   // Configure 32-bit auto-reload register (ARR) with maximum possible value
   TIM2->ARR = 0xffffffff; // count to 2^32, then wraparound (approximately every 429 seconds)
@@ -356,9 +294,7 @@ void setup()
   TIM2->SMCR |= TIM_SMCR_ECE; // 0x4000
   
   // start the timer
-  MyTim->resume();
-  
-  delay(100); // not sure this delay is needed
+  FreqMeasTim->resume();
 }
 
 void pinModeAF(int ulPin, uint32_t Alternate)
@@ -374,236 +310,237 @@ void pinModeAF(int ulPin, uint32_t Alternate)
    LL_GPIO_SetPinMode(get_GPIO_Port(STM_PORT(pn)), STM_LL_GPIO_PIN(pn), LL_GPIO_MODE_ALTERNATE);
 }
 
-static int32_t readVref()
-{
-#ifdef __LL_ADC_CALC_VREFANALOG_VOLTAGE
-  return (__LL_ADC_CALC_VREFANALOG_VOLTAGE(analogRead(AVREF), LL_ADC_RESOLUTION));
-#else
-  return (VREFINT * ADC_RANGE / analogRead(AVREF)); // ADC sample to mV
-#endif
-}
 
-static int32_t readTempSensor(int32_t VRef)
+void loop()
 {
-#ifdef __LL_ADC_CALC_TEMPERATURE
-  return (__LL_ADC_CALC_TEMPERATURE(VRef, analogRead(ATEMP), LL_ADC_RESOLUTION));
-#elif defined(__LL_ADC_CALC_TEMPERATURE_TYP_PARAMS)
-  return (__LL_ADC_CALC_TEMPERATURE_TYP_PARAMS(AVG_SLOPE, V25, CALX_TEMP, VRef, analogRead(ATEMP), LL_ADC_RESOLUTION));
-#else
-  return 0;
-#endif
-}
-
-static int32_t readVoltage(int32_t VRef, uint32_t apin)
-{
-  return (__LL_ADC_CALC_DATA_TO_VOLTAGE(VRef, analogRead(apin), LL_ADC_RESOLUTION));
-}
-
-void displayInfo()
-{
-  Serial.print(F("Location:")); 
-  if (gps.location.isValid())
+  if (gpsWaitFix(5)) // wait 5 seconds for fix
   {
-    Serial.print(F(" ALT=")); Serial.print(gps.altitude.meters()); 
-    Serial.print(F(" LAT=")); Serial.print(gps.location.lat(),6); 
-    Serial.print(F(" LON=")); Serial.print(gps.location.lng(),6); 
-    sats = gps.satellites.value();
-    char sats_str[3];
-    strcpy(sats_str, u8x8_u8toa(sats, 2));
-    u8x8.drawString(14,4,sats_str);
-    Serial.print(F(" SATS=")); Serial.println(sats);
-    gpsLock = true;
+    Serial.println();
+    Serial.println();
+    Serial.print(F("Fix time "));
+    Serial.print(endFixmS - startGetFixmS);
+    Serial.println(F("mS"));
+
+    GPSLat = gps.location.lat();
+    GPSLon = gps.location.lng();
+    GPSAlt = gps.altitude.meters();
+    GPSSats = gps.satellites.value();
+    GPSHdop = gps.hdop.value();
+
+    hours = gps.time.hour();
+    mins = gps.time.minute();
+    secs = gps.time.second();
+    day = gps.date.day();
+    month = gps.date.month();
+    year = gps.date.year();
+
+    adcVctl = analogRead(VctlInputPin);
+
+    calcavg(); // calculate frequency averages
+
+    printGPSDOstats();
+    displayscreen1();
+    startGetFixmS = millis();    //have a fix, next thing that happens is checking for a fix, so restart timer
   }
   else
   {
-    Serial.print(F(" INVALID"));
-    gpsLock = false;
+    disp.clearLine(1);
+    disp.setCursor(0, 1);
+    disp.print(F("No GPS Fix "));
+    disp.print( (millis() - startGetFixmS) / 1000 );
+    Serial.println();
+    Serial.println();
+    Serial.print(F("Timeout - No GPS Fix "));
+    Serial.print( (millis() - startGetFixmS) / 1000 );
+    Serial.println(F("s"));
   }
-  if (gpsLock) {
-    u8x8.setCursor(4, 4); u8x8.print("Lock");
-  } else {
-    u8x8.setCursor(4, 4); u8x8.print("N/A ");
-  }
+}
 
-  Serial.print(F("  Date/Time: "));
-  if (gps.date.isValid())
+
+bool gpsWaitFix(uint16_t waitSecs)
+{
+  //waits a specified number of seconds for a fix, returns true for good fix
+
+  uint32_t endwaitmS;
+  uint8_t GPSchar;
+
+  Serial.print(F("Wait GPS Fix "));
+  Serial.print(waitSecs);
+  Serial.println(F(" seconds"));
+
+  endwaitmS = millis() + (waitSecs * 1000);
+
+  while (millis() < endwaitmS)
   {
-    Serial.print(gps.date.month());
-    Serial.print(F("/"));
-    Serial.print(gps.date.day());
-    Serial.print(F("/"));
-    Serial.print(gps.date.year());
-
-    // note the use of u8x8.print() function
-    u8x8.setCursor(6, 5);
-    if (gps.date.day() < 10) u8x8.print("0");
-    u8x8.print(gps.date.day());
-    u8x8.print("/");
-    if (gps.date.month() < 10) u8x8.print("0");
-    u8x8.print(gps.date.month());
-    u8x8.print("/");
-    u8x8.print(gps.date.year());
-  }
-  else
-  {
-    Serial.print(F("INVALID"));
-  }
-
-  Serial.print(F(" "));
-  if (gps.time.isValid())
-  {
-    if (gps.time.hour() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.hour());
-    GMTtime[0] = '0' + gps.time.hour() / 10;
-    GMTtime[1] = '0' + gps.time.hour() % 10;
-   
-    Serial.print(F(":"));
-    if (gps.time.minute() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.minute());
-    GMTtime[3] = '0' + gps.time.minute() / 10;
-    GMTtime[4] = '0' + gps.time.minute() % 10;
-   
-    Serial.print(F(":"));
-    if (gps.time.second() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.second());
-
-    // OCXO frequency
-    Serial.println();
-    Serial.print(F("Counter: "));
-    Serial.print(TIM2->CCR3);
-    Serial.print(F(" Frequency: "));
-    Serial.print(calcfreqint);
-    Serial.print(F(" Hz"));
-    Serial.println();
-    Serial.print("10s Frequency Avg: ");
-    Serial.print(avgften,1);
-    Serial.print(F(" Hz"));
-    Serial.println();
-    Serial.print("100s Frequency Avg: ");
-    Serial.print(avgfhun,2);
-    Serial.print(F(" Hz"));
-    Serial.println();
-    // display OCXO frequency on OLED
-    if (calcfreqint < 10000000) {
-      u8x8.setCursor(3, 1); u8x8.print(" ");
+    if (Serial1.available() > 0)
+    {
+      GPSchar = Serial1.read();
+      gps.encode(GPSchar);
+      Serial.write(GPSchar);
     }
-    else u8x8.setCursor(3, 1);
-    u8x8.print(calcfreqint);
-    u8x8.print("  ");
 
-    
-    
-    // Serial.print(F("."));
-    // if (gps.time.centisecond() < 10) Serial.print(F("0"));
-    // Serial.print(gps.time.centisecond());
-    GMTtime[6] = '0' + gps.time.second() / 10;
-    GMTtime[7] = '0' + gps.time.second() % 10;
-    u8x8.drawString(4,6,GMTtime);
+    if (gps.location.isUpdated() && gps.altitude.isUpdated() && gps.date.isUpdated())
+    {
+      endFixmS = millis();                                //record the time when we got a GPS fix
+      return true;
+    }
   }
-  else
+
+  return false;
+}
+
+
+void printGPSDOstats() 
+{
+  float tempfloat;
+
+  Serial.print(F("New GPS Fix "));
+
+  tempfloat = ( (float) GPSHdop / 100);
+
+  Serial.print(F("Lat,"));
+  Serial.print(GPSLat, 6);
+  Serial.print(F(",Lon,"));
+  Serial.print(GPSLon, 6);
+  Serial.print(F(",Alt,"));
+  Serial.print(GPSAlt, 1);
+  Serial.print(F("m,Sats,"));
+  Serial.print(GPSSats);
+  Serial.print(F(",HDOP,"));
+  Serial.print(tempfloat, 2);
+  Serial.print(F(",Time,"));
+
+  if (hours < 10)
   {
-    Serial.print(F("INVALID"));
+    Serial.print(F("0"));
   }
-    
-  // send data from various sensors and change yellow led
-  // status according to measured current
-  int analogVal = analogRead(VctlInputPin);
-  float Tbmp280 = bmp.readTemperature();
 
-  float Vctl = (float(analogVal)/4096) * 3.3;
+  Serial.print(hours);
+  Serial.print(F(":"));
+
+  if (mins < 10)
+  {
+    Serial.print(F("0"));
+  }
+
+  Serial.print(mins);
+  Serial.print(F(":"));
+
+  if (secs < 10)
+  {
+    Serial.print(F("0"));
+  }
+
+  Serial.print(secs);
+  Serial.print(F(",Date,"));
+
+  Serial.print(day);
+  Serial.print(F("/"));
+  Serial.print(month);
+  Serial.print(F("/"));
+  Serial.print(year);
+
+  Serial.println();
+  float Vctl = (float(adcVctl)/4096) * 3.3;
   Serial.print("Vctl: ");
   Serial.print(Vctl);
   Serial.print("  DAC: ");
   Serial.println(adjusted_DAC_output);
-  u8x8.setCursor(9, 7);
-  u8x8.print(Vctl,2);
 
-  //get and print temperatures
-    Serial.print(F("Temperature = "));
-    Serial.print(Tbmp280);
-    Serial.println(" *C");
-
-    u8x8.setCursor(2, 7);
-    u8x8.print(Tbmp280,1);
-
-    Serial.print(F("Pressure = "));
-    Serial.print((bmp.readPressure()+PressureOffset)/100);
-    Serial.println(" hPa");
-
-    Serial.print(F("Approx altitude = "));
-    Serial.print(bmp.readAltitude()); /* Adjusted to local forecast! */
-    Serial.println(" m");
-
-    Serial.println();
-
-  // internal sensors
-  Serial.print("VRef(mv)= ");
-  int32_t VRef = readVref();
-  Serial.print(VRef);
-  Serial.print("\tTemp(°C)= ");
-  Serial.print(readTempSensor(VRef));
-  // on Black Pill, VBAT is connected to VDD - schottky diode drop and then 1/4 voltage divider inside STM32F411CEU6
-  Serial.print("\tVbat(mv)= ");
-  Serial.print(readVoltage(VRef, AVBAT));
-  // A0 is connected to the user key on Black Pill
-  // and a 1:2 voltage divider from Vcc
-  Serial.print("\tVcc(V)= ");
-  float Vcc;
-  Vcc = 0.002 * readVoltage(VRef, A0);
-  Serial.println(Vcc, 2);
-
-  // update OLED display uptime
-  uptime[0] = '0' + hours / 10;
-  uptime[1] = '0' + hours % 10;
-  uptime[3] = '0' + minutes / 10;
-  uptime[4] = '0' + minutes % 10;
-  uptime[6] = '0' + seconds / 10;
-  uptime[7] = '0' + seconds % 10;
-  u8x8.drawString(2,3,uptime); 
-  // days
-  u8x8.setCursor(9, 2);
-  u8x8.print(days);
-
-  // AHT10
-  sensors_event_t humidity, temp;
-  aht.getEvent(&humidity, &temp);// populate temp and humidity objects with fresh data
-  Serial.print("Temperature: "); Serial.print(temp.temperature); Serial.println(" degrees C");
-  Serial.print("Humidity: "); Serial.print(humidity.relative_humidity); Serial.println("% rH");
-
-  /*
-  sensors_event_t humidity, temp;
-  aht.getEvent(&humidity, &temp);// populate temp and humidity objects with fresh data
-  Serial.print("Temperature: "); Serial.print(temp.temperature); Serial.println(" degrees C");
-  Serial.print("Humidity: "); Serial.print(humidity.relative_humidity); Serial.println("% rH");
-
-  // INA219 measurements
-  Serial.print("Bus voltage: ");
-  Serial.print(imonitor.busVoltage());
-  Serial.println("V");
-  Serial.print("Shunt voltage: ");
-  Serial.print(imonitor.shuntVoltage());
-  Serial.println("mV");
-  Serial.print("Shunt current: ");
-  ocxo_current = imonitor.shuntCurrent();
-  Serial.print(ocxo_current);
-  Serial.println("mA");
-  Serial.print("Bus power: ");
-  Serial.print(imonitor.busPower());
-  Serial.println("mW"); 
+  // OCXO frequency measurements
   Serial.println();
+  Serial.print(F("Counter: "));
+  Serial.print(TIM2->CCR3);
+  Serial.print(F(" Frequency: "));
+  Serial.print(calcfreqint);
+  Serial.print(F(" Hz"));
+  Serial.println();
+  Serial.print("10s Frequency Avg: ");
+  Serial.print(avgften,1);
+  Serial.print(F(" Hz"));
+  Serial.println();
+  Serial.print("100s Frequency Avg: ");
+  Serial.print(avgfhun,2);
+  Serial.print(F(" Hz"));
+  Serial.println();  
+  
+  Serial.println();
+  Serial.println();
+}
 
-// update yellow_led_state according to current
-// current less than 50mA -> led OFF
-// current more than 300ma -> led blink
-// otherwise led ON
-  if (ocxo_current < 50) yellow_led_state = 0;
-  else yellow_led_state = 1;
-  if (ocxo_current > 300) yellow_led_state = 2;
-  */
+
+void displayscreen1()
+{
+  //show GPS data on OLED display
+  float tempfloat;
+  disp.clearLine(1); // clear error message, if any
+
+  // Latitude
+  //disp.clearLine(2);
+  disp.setCursor(0, 2);
+  disp.print(GPSLat, 6);
+  // Longitude
+  //disp.clearLine(3);
+  disp.setCursor(0, 3);
+  disp.print(GPSLon, 6);
+  // Altitude and Satellites
+  //disp.clearLine(4);
+  disp.setCursor(0, 4);
+  disp.print(GPSAlt);
+  disp.print(F("m"));
+  disp.setCursor(9, 4);
+  disp.print(F("Sats "));
+  disp.print(GPSSats);
+  if (GPSSats < 10) disp.print(F(" ")); // clear possible digit when sats >= 10
+  // HDOP
+  //disp.clearLine(5);
+  disp.setCursor(0, 5);
+  disp.print(F("HDOP "));
+  tempfloat = ((float) GPSHdop / 100);
+  disp.print(tempfloat);
+
+  // Time
+  //disp.clearLine(6);
+  disp.setCursor(0, 6);
+
+  if (hours < 10)
+  {
+    disp.print(F("0"));
+  }
+
+  disp.print(hours);
+  disp.print(F(":"));
+
+  if (mins < 10)
+  {
+    disp.print(F("0"));
+  }
+
+  disp.print(mins);
+  disp.print(F(":"));
+
+  if (secs < 10)
+  {
+    disp.print(F("0"));
+  }
+
+  disp.print(secs);
+  disp.print(F("  "));
+
+  // Date
+  //disp.clearLine(7);
+  disp.setCursor(0, 7);
+
+  disp.print(day);
+  disp.print(F("/"));
+  disp.print(month);
+  disp.print(F("/"));
+  disp.print(year);
 }
 
 void calcavg() {
-  // Calculate the OCXO frequency to 1, 2, 3 decimals only when the respective buffers are full
+  // Calculate the OCXO frequency to 1 or 2 decimal places only when the respective buffers are full
+  
   if (cbTen_full) { // we want (latest fcount - oldest fcount) / 10
     
     uint32_t latfcount, oldfcount; // latest fcount, oldest fcount stored in ring buffer
@@ -620,7 +557,8 @@ void calcavg() {
     // oldest fcount is always circbuf_ten[cbiten_newest-2]
     // except when cbiten_newest is <2 (zero or 1)
     
-  } 
+  }
+   
   if (cbHun_full) { // we want (latest fcount - oldest fcount) / 100
     
     uint32_t latfcount, oldfcount;
@@ -636,37 +574,5 @@ void calcavg() {
     avgfhun = double(latfcount - oldfcount)/100.0;
     // oldest fcount is always circbuf_ten[cbiten_newest-2]
     // except when cbiten_newest is <2 (zero or 1)
-  } 
-}
-
-// Main loop
-// ---------
-
-void loop()
-{   
-  // the main loop displays information every time a new GPS sentence is correctly encoded.
-  // (around 6 times per second)
-  while (Serial1.available() > 0)
-    if (gps.encode(Serial1.read())) {
-      calcavg();
-      displayInfo();
-      Serial2.print("Hello World");
-    }
-    
-  // every 400s of uptime, adjust DAC output up or down 1 bit (or leave it untouched)
-  // depending on the 100s frequency average
-  
-  if (must_adjust_DAC) { // adjust DAC once every 400s
-    if (avgfhun >= 10000000.01) {
-      // decrease DAC by one bit
-      adjusted_DAC_output--;
-      dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
-      must_adjust_DAC = false;
-    } else if (avgfhun <= 9999999.99) {
-      // increase DAC by one bit
-      adjusted_DAC_output++;
-      dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
-      must_adjust_DAC = false;
-    }
   } 
 }
