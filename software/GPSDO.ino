@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  GPSDO v0.02d by André Balsa, May 2021
+  GPSDO v0.02e by André Balsa, May 2021
   reuses pieces of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
 
   This program is supplied as is, it is up to the user of the program to decide if the program is
@@ -52,17 +52,39 @@
 *******************************************************************************************************/
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.02d"
+#define Program_Version "v0.02e"
 #define Author_Name "André Balsa"
 
+// Define optional modules
+// -----------------------
+#define GPSDO_AHT10           // I2C temperature and humidity sensor
+#define GPSDO_GEN_2kHz        // generate 2kHz square wave test signal on pin PB9 using Timer 4
+#define GPSDO_BMP280_SPI      // SPI atmospheric pressure, temperature and altitude sensor
+#define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
+#define GPSDO_VCC             // Vcc (nominal 5V) ; reading Vcc requires 1:2 voltage divider to PA0
+#define GPSDO_VDD             // Vdd (nominal 3.3V)
+// #define GPSDO_VERBOSE_NMEA    // GPS module NMEA stream echoed to USB serial, Bluetooth serial
+
+// Includes
+// --------
 #if !defined(STM32_CORE_VERSION) || (STM32_CORE_VERSION  < 0x02000000)
 #error "Due to API change, this sketch is compatible with STM32_CORE_VERSION  >= 0x02000000"
 #endif
+
+#ifdef GPSDO_BLUETOOTH
+//              UART    RX   TX
+HardwareSerial Serial2(PA3, PA2);                  // Serial connection to HC-06 Bluetooth module
+#endif // BLUETOOTH
 
 #include <TinyGPS++.h>                             // get library here > http://arduiniana.org/libraries/tinygpsplus/
 TinyGPSPlus gps;                                   // create the TinyGPS++ object
 
 #include <Wire.h>                                  // Hardware I2C library on STM32
+
+#ifdef GPSDO_AHT10
+#include <Adafruit_AHTX0.h>                        // Adafruit AHTX0 library
+Adafruit_AHTX0 aht;                                // create object aht
+#endif // AHT10
 
 #include <U8x8lib.h>                                      // get library here >  https://github.com/olikraus/u8g2 
 U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for standard 0.96" SSD1306
@@ -76,13 +98,14 @@ volatile bool must_adjust_DAC = false;    // true when there is enough data to a
 #define VctlInputPin PB0
 int adcVctl = 0;                      // Vctl read by ADC pin PB0
 
+#ifdef GPSDO_BMP280_SPI
 // BMP280 - SPI
 #include <SPI.h>
 #include <Adafruit_BMP280.h>
 #define BMP280_CS   (PA4)              // SPI1 uses PA4, PA5, PA6, PA7
 Adafruit_BMP280 bmp(BMP280_CS);        // hardware SPI, use PA4 as Chip Select
 const uint16_t PressureOffset = 1360;  // that offset must be calculated for your sensor and location
-
+#endif // BMP280_SPI
 
 // LEDs
 
@@ -239,6 +262,11 @@ void setup()
   // Setup serial interfaces
   Serial1.begin(9600);  // Hardware serial to GPS module
   Serial.begin(115200); // USB serial
+  #ifdef GPSDO_BLUETOOTH
+  // HC-06 module baud rate factory setting is 9600, 
+  // use separate program to set baud rate to 115200
+  Serial2.begin(115200);
+  #endif // BLUETOOTH
 
   Serial.println();
   Serial.print(F(__TIME__));
@@ -255,7 +283,7 @@ void setup()
   disp.setFont(u8x8_font_chroma48medium8_r);
   disp.clear();
   disp.setCursor(0, 0);
-  disp.print(F("GPSDO - v0.02d"));
+  disp.print(F("GPSDO - v0.02e"));
 
   // Initialize I2C again (not sure this is needed, though)
   Wire.begin();
@@ -269,10 +297,21 @@ void setup()
   dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096 so 2048 should be 1/2 Vdd = approx. 1.65V
   analogReadResolution(12); // make sure we read 12 bit values
 
-  // generate a test 2kHz square wave on PB9 PWM pin - because we can
+  #ifdef GPSDO_AHT10
+  if (! aht.begin()) {
+    Serial.println("Could not find AHT10? Check wiring");
+    while (1) delay(10);
+  }
+  Serial.println("AHT10 found");
+  #endif // AHT10
+
+  #ifdef GPSDO_GEN_2kHz
+  // generate a test 2kHz square wave on PB9 PWM pin - because we can and Timer 4 is available
   analogWriteFrequency(2000); // default PWM frequency is 1kHz, change it to 2kHz
   analogWrite(PB9, 127); // 127 means 50% duty cycle so a square wave
+  #endif // GEN_2kHz
 
+  #ifdef GPSDO_BMP280_SPI
   // Initialize BMP280
   if (!bmp.begin()) {
     Serial.println(F("Could not find a valid BMP280 sensor, check wiring or "
@@ -286,6 +325,7 @@ void setup()
                   Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
                   Adafruit_BMP280::FILTER_X16,      /* Filtering. */
                   Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+  #endif // BMP280_SPI
   
   Serial.println(F("GPSDO Starting"));
   Serial.println();
@@ -360,6 +400,10 @@ void loop()
 
     calcavg(); // calculate frequency averages
 
+    #ifdef GPSDO_BLUETOOTH
+    btGPSDOstats();
+    #endif // BLUETOOTH
+
     printGPSDOstats();
     displayscreen1();
     startGetFixmS = millis();    //have a fix, next thing that happens is checking for a fix, so restart timer
@@ -413,7 +457,12 @@ bool gpsWaitFix(uint16_t waitSecs)
     {
       GPSchar = Serial1.read();
       gps.encode(GPSchar);
-      Serial.write(GPSchar);
+      #ifdef GPSDO_VERBOSE_NMEA
+      Serial.write(GPSchar);  // echo NMEA stream to USB serial
+      #ifdef GPSDO_BLUETOOTH
+      Serial2.write(GPSchar); // echo NMEA stream to Bluetooth serial
+      #endif // Bluetooth
+      #endif // VERBOSE_NMEA
     }
 
     if (gps.location.isUpdated() && gps.altitude.isUpdated() && gps.date.isUpdated())
@@ -475,7 +524,7 @@ void printGPSDOstats()
   Serial.print(F("/"));
   Serial.print(month);
   Serial.print(F("/"));
-  Serial.print(year);
+  Serial.println(year);
 
   Serial.println();
   float Vctl = (float(adcVctl)/4096) * 3.3;
@@ -501,8 +550,9 @@ void printGPSDOstats()
   Serial.print(F(" Hz"));
   Serial.println(); 
 
+  #ifdef GPSDO_BMP280_SPI
   // BMP280 measurements
-  Serial.print(F("Temperature = "));
+  Serial.print(F("BMP280 Temperature = "));
   Serial.print(bmp.readTemperature(), 1);
   Serial.println(" *C");
   Serial.print(F("Pressure = "));
@@ -511,11 +561,126 @@ void printGPSDOstats()
   Serial.print(F("Approx altitude = "));
   Serial.print(bmp.readAltitude(), 1); /* Adjusted to local forecast! */
   Serial.println(" m");
+  #endif BMP280_SPI
+
+  #ifdef GPSDO_AHT10
+  // AHT10 measurements
+  sensors_event_t humidity, temp;
+  aht.getEvent(&humidity, &temp);// populate temp and humidity objects with fresh data
+  Serial.print("AHT10 Temperature: ");
+  Serial.print(temp.temperature);
+  Serial.println(" *C");
+  Serial.print("Humidity: ");
+  Serial.print(humidity.relative_humidity);
+  Serial.println("% rH");
+  #endif // AHT10
   
   Serial.println();
   Serial.println();
 }
 
+void btGPSDOstats() 
+{
+  float tempfloat;
+
+  Serial2.print(F("New GPS Fix "));
+
+  tempfloat = ( (float) GPSHdop / 100);
+
+  Serial2.print(F("Lat,"));
+  Serial2.print(GPSLat, 6);
+  Serial2.print(F(",Lon,"));
+  Serial2.print(GPSLon, 6);
+  Serial2.print(F(",Alt,"));
+  Serial2.print(GPSAlt, 1);
+  Serial2.print(F("m,Sats,"));
+  Serial2.print(GPSSats);
+  Serial2.print(F(",HDOP,"));
+  Serial2.print(tempfloat, 2);
+  Serial2.print(F(",Time,"));
+
+  if (hours < 10)
+  {
+    Serial2.print(F("0"));
+  }
+
+  Serial2.print(hours);
+  Serial2.print(F(":"));
+
+  if (mins < 10)
+  {
+    Serial2.print(F("0"));
+  }
+
+  Serial2.print(mins);
+  Serial2.print(F(":"));
+
+  if (secs < 10)
+  {
+    Serial2.print(F("0"));
+  }
+
+  Serial2.print(secs);
+  Serial2.print(F(",Date,"));
+
+  Serial2.print(day);
+  Serial2.print(F("/"));
+  Serial2.print(month);
+  Serial2.print(F("/"));
+  Serial2.println(year);
+
+  Serial2.println();
+  float Vctl = (float(adcVctl)/4096) * 3.3;
+  Serial2.print("Vctl: ");
+  Serial2.print(Vctl);
+  Serial2.print("  DAC: ");
+  Serial2.println(adjusted_DAC_output);
+
+  // OCXO frequency measurements
+  Serial2.println();
+  Serial2.print(F("Counter: "));
+  Serial2.print(TIM2->CCR3);
+  Serial2.print(F(" Frequency: "));
+  Serial2.print(calcfreqint);
+  Serial2.print(F(" Hz"));
+  Serial2.println();
+  Serial2.print("10s Frequency Avg: ");
+  Serial2.print(avgften,1);
+  Serial2.print(F(" Hz"));
+  Serial2.println();
+  Serial2.print("100s Frequency Avg: ");
+  Serial2.print(avgfhun,2);
+  Serial2.print(F(" Hz"));
+  Serial2.println(); 
+
+  #ifdef GPSDO_BMP280_SPI
+  // BMP280 measurements
+  Serial2.print(F("BMP280 Temperature = "));
+  Serial2.print(bmp.readTemperature(), 1);
+  Serial2.println(" *C");
+  Serial2.print(F("Pressure = "));
+  Serial2.print((bmp.readPressure()+PressureOffset)/100, 1);
+  Serial2.println(" hPa");
+  Serial2.print(F("Approx altitude = "));
+  Serial2.print(bmp.readAltitude(), 1); /* Adjusted to local forecast! */
+  Serial2.println(" m");
+  #endif BMP280_SPI
+
+  #ifdef GPSDO_AHT10
+  // AHT10 measurements
+  sensors_event_t humidity, temp;
+  aht.getEvent(&humidity, &temp);// populate temp and humidity objects with fresh data
+  Serial2.print("AHT10 Temperature: ");
+  Serial2.print(temp.temperature);
+  Serial2.println(" *C");
+  Serial2.print("Humidity: ");
+  Serial2.print(humidity.relative_humidity);
+  Serial2.println("% rH");
+  #endif // AHT10
+  
+  Serial2.println();
+  Serial2.println();
+}
 
 void displayscreen1()
 {
