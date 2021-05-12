@@ -19,3 +19,5 @@ I decided to build my own version of a 10MHz GPSDO with the following features:
 - An optional Bluetooth serial interface for wireless communication with a PC.
 - Extensive logging of various operating parameters to allow further software tuning.
 - An optional small OLED displaying room temperature, UTC time, uptime, operating status, measured frequency.
+
+<img src="https://github.com/AndrewBCN/STM32-GPSDO/raw/main/GPSDO_breadboarda.jpg">
