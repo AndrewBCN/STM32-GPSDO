@@ -1,16 +1,16 @@
 /*******************************************************************************************************
-  GPSDO by André Balsa, May 2021
-  reuses excellent code by Stuart Robinson - 05/04/20
+  GPSDO v0.02d by André Balsa, May 2021
+  reuses pieces of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
 
   This program is supplied as is, it is up to the user of the program to decide if the program is
   suitable for the intended purpose and free from errors.
 *******************************************************************************************************/
 
-// GPSDO with optional I2C SSD1306 display, Hardware Serial on STM32 MCU
+// GPSDO with optional I2C SSD1306 display, STM32 MCU, DFLL in software
 
 /*******************************************************************************************************
-  Program Operation -  This program is a portable GPS checker with display option. It uses an SSD1306 or
-  SH1106 128x64 I2C OLED display. It reads the GPS for 5 seconds and copies the characters from the GPS
+  Program Operation -  This Arduino sketch implements a GPSDO with display option. It uses an SSD1306 
+  128x64 I2C OLED display. It reads the GPS for 5 seconds and copies the characters from the GPS
   to the serial monitor, this is an example printout from a working GPS that has just been powered on;
    
   GPSDO Starting
@@ -36,7 +36,7 @@
 
   When the program detects that the GPS has a fix, it prints the Latitude, Longitude, Altitude, Number
   of satellites in use, the HDOP value, time and date to the serial monitor. If the I2C OLED display is
-  attached that is updated as well. Display is assumed to be on I2C address 0x3C.
+  attached that is updated as well.
 
   Serial monitor baud rate is set at 115200.
 *******************************************************************************************************/
@@ -49,17 +49,11 @@
   valid fix. It reads the GPS for 5 seconds and if there is no fix, prints a message on the serial monitor
   and updates the seconds without a fix on the display. During this time the data coming from the GPS is
   copied to the serial monitor also.
-
-  When the program detects that the GPS has a fix, it prints the Latitude, Longitude, Altitude, Number
-  of satellites in use, the HDOP value, time and date to the serial monitor. If the I2C OLED display is
-  attached that is updated as well. Display is assumed to be on I2C address 0x3C.
-
-  Serial monitor baud rate is set at 115200.
 *******************************************************************************************************/
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.02c"
-#define authorname "André Balsa reusing code from Stuart Robinson"
+#define Program_Version "v0.02d"
+#define Author_Name "André Balsa"
 
 #if !defined(STM32_CORE_VERSION) || (STM32_CORE_VERSION  < 0x02000000)
 #error "Due to API change, this sketch is compatible with STM32_CORE_VERSION  >= 0x02000000"
@@ -76,11 +70,19 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for s
 #include <Adafruit_MCP4725.h>                      // MCP4725 Adafruit library
 Adafruit_MCP4725 dac;
 const uint16_t default_DAC_output = 2593; // this varies from OCXO to OCXO
-uint16_t adjusted_DAC_output;             // we adjust this value to close the frequency locked loop
-volatile bool must_adjust_DAC = false;
+uint16_t adjusted_DAC_output;             // we adjust this value to "close the loop" of the DFLL
+volatile bool must_adjust_DAC = false;    // true when there is enough data to adjust Vctl
 
 #define VctlInputPin PB0
 int adcVctl = 0;                      // Vctl read by ADC pin PB0
+
+// BMP280 - SPI
+#include <SPI.h>
+#include <Adafruit_BMP280.h>
+#define BMP280_CS   (PA4)              // SPI1 uses PA4, PA5, PA6, PA7
+Adafruit_BMP280 bmp(BMP280_CS);        // hardware SPI, use PA4 as Chip Select
+const uint16_t PressureOffset = 1360;  // that offset must be calculated for your sensor and location
+
 
 // LEDs
 
@@ -253,7 +255,7 @@ void setup()
   disp.setFont(u8x8_font_chroma48medium8_r);
   disp.clear();
   disp.setCursor(0, 0);
-  disp.print(F("GPSDO - v0.02c"));
+  disp.print(F("GPSDO - v0.02d"));
 
   // Initialize I2C again (not sure this is needed, though)
   Wire.begin();
@@ -267,6 +269,24 @@ void setup()
   dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096 so 2048 should be 1/2 Vdd = approx. 1.65V
   analogReadResolution(12); // make sure we read 12 bit values
 
+  // generate a test 2kHz square wave on PB9 PWM pin - because we can
+  analogWriteFrequency(2000); // default PWM frequency is 1kHz, change it to 2kHz
+  analogWrite(PB9, 127); // 127 means 50% duty cycle so a square wave
+
+  // Initialize BMP280
+  if (!bmp.begin()) {
+    Serial.println(F("Could not find a valid BMP280 sensor, check wiring or "
+                      "try a different address!"));
+    while (1) delay(10);
+  }
+
+  // Default settings from datasheet.
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
+                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
+                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
+                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
+                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+  
   Serial.println(F("GPSDO Starting"));
   Serial.println();
 
@@ -334,6 +354,8 @@ void loop()
     month = gps.date.month();
     year = gps.date.year();
 
+    if (must_adjust_DAC) adjustVctlDAC(); // in principle just once every 429 seconds
+
     adcVctl = analogRead(VctlInputPin);
 
     calcavg(); // calculate frequency averages
@@ -353,6 +375,21 @@ void loop()
     Serial.print(F("Timeout - No GPS Fix "));
     Serial.print( (millis() - startGetFixmS) / 1000 );
     Serial.println(F("s"));
+  }
+}
+
+void adjustVctlDAC() // implement more sophisticated algorithm in the future
+{
+  if (avgfhun >= 10000000.01) {
+    // decrease DAC by one bit
+    adjusted_DAC_output--;
+    dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
+    must_adjust_DAC = false;
+  } else if (avgfhun <= 9999999.99) {
+    // increase DAC by one bit
+    adjusted_DAC_output++;
+    dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
+    must_adjust_DAC = false;
   }
 }
 
@@ -462,7 +499,18 @@ void printGPSDOstats()
   Serial.print("100s Frequency Avg: ");
   Serial.print(avgfhun,2);
   Serial.print(F(" Hz"));
-  Serial.println();  
+  Serial.println(); 
+
+  // BMP280 measurements
+  Serial.print(F("Temperature = "));
+  Serial.print(bmp.readTemperature(), 1);
+  Serial.println(" *C");
+  Serial.print(F("Pressure = "));
+  Serial.print((bmp.readPressure()+PressureOffset)/100, 1);
+  Serial.println(" hPa");
+  Serial.print(F("Approx altitude = "));
+  Serial.print(bmp.readAltitude(), 1); /* Adjusted to local forecast! */
+  Serial.println(" m");
   
   Serial.println();
   Serial.println();
@@ -471,9 +519,18 @@ void printGPSDOstats()
 
 void displayscreen1()
 {
-  //show GPS data on OLED display
+  //show GPSDO data on OLED display
   float tempfloat;
-  disp.clearLine(1); // clear error message, if any
+
+  // OCXO frequency
+  disp.setCursor(0, 1);
+  disp.print(F("F "));
+  if (calcfreqint < 10000000) {
+    disp.setCursor(2, 1); disp.print(" ");
+  }
+  else disp.setCursor(2, 1);
+  disp.print(calcfreqint);
+  disp.print(" Hz ");
 
   // Latitude
   //disp.clearLine(2);
