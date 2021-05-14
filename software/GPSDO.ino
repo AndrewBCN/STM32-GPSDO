@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  GPSDO v0.02e by André Balsa, May 2021
+  GPSDO v0.02f by André Balsa, May 2021
   reuses pieces of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
 
   This program is supplied as is, it is up to the user of the program to decide if the program is
@@ -52,7 +52,7 @@
 *******************************************************************************************************/
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.02e"
+#define Program_Version "v0.02f"
 #define Author_Name "André Balsa"
 
 // Define optional modules
@@ -91,7 +91,10 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for s
 
 #include <Adafruit_MCP4725.h>                      // MCP4725 Adafruit library
 Adafruit_MCP4725 dac;
-const uint16_t default_DAC_output = 2593; // this varies from OCXO to OCXO
+const uint16_t default_DAC_output = 2557; // this varies from OCXO to OCXO, and with time and temperature
+                                          // Some values I have been using:
+                                          // 2603 for an ISOTEMP 143-141, determined empirically
+                                          // 2557 for a CTI OSC5A2B02, determined empirically
 uint16_t adjusted_DAC_output;             // we adjust this value to "close the loop" of the DFLL
 volatile bool must_adjust_DAC = false;    // true when there is enough data to adjust Vctl
 
@@ -153,7 +156,7 @@ volatile uint32_t cbiten_newest=0; // index to oldest, newest data
 volatile uint32_t cbihun_newest=0;
 
 volatile bool cbTen_full=false, cbHun_full=false;  // flag when buffer full
-double avgften, avgfhun; // average frequency calculated once the buffer is full
+double avgften=0, avgfhun=0; // average frequency calculated once the buffer is full
 
 
 // Interrupt Service Routine for the 2Hz timer
@@ -180,7 +183,7 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
       previousfcount = fcount;
     }
   } else { // prepare for wraparound every 429 seconds
-    // TIM2->CCR3 = 0x0; // clear CCR3 (no need to stop counter) perhaps this is not needed
+    TIM2->CCR3 = 0x0; // clear CCR3 (no need to stop counter), perhaps this is not needed
     cbTen_full=false; cbHun_full=false; // we also need to refill the ring buffers
     cbiten_newest=0; cbihun_newest=0;
     previousfcount = 0;
@@ -283,7 +286,7 @@ void setup()
   disp.setFont(u8x8_font_chroma48medium8_r);
   disp.clear();
   disp.setCursor(0, 0);
-  disp.print(F("GPSDO - v0.02e"));
+  disp.print(F("GPSDO - v0.02f"));
 
   // Initialize I2C again (not sure this is needed, though)
   Wire.begin();
@@ -561,7 +564,7 @@ void printGPSDOstats()
   Serial.print(F("Approx altitude = "));
   Serial.print(bmp.readAltitude(), 1); /* Adjusted to local forecast! */
   Serial.println(" m");
-  #endif BMP280_SPI
+  #endif // BMP280_SPI
 
   #ifdef GPSDO_AHT10
   // AHT10 measurements
@@ -664,7 +667,7 @@ void btGPSDOstats()
   Serial2.print(F("Approx altitude = "));
   Serial2.print(bmp.readAltitude(), 1); /* Adjusted to local forecast! */
   Serial2.println(" m");
-  #endif BMP280_SPI
+  #endif // BMP280_SPI
 
   #ifdef GPSDO_AHT10
   // AHT10 measurements
@@ -690,12 +693,31 @@ void displayscreen1()
   // OCXO frequency
   disp.setCursor(0, 1);
   disp.print(F("F "));
-  if (calcfreqint < 10000000) {
-    disp.setCursor(2, 1); disp.print(" ");
+  // display 1s, 10s or 100s value depending on whether data is available
+  if (cbTen_full) {
+    if (cbHun_full) { // if we have data over 100 seconds
+      if (avgfhun < 10000000) {
+        disp.setCursor(2, 1); disp.print(" ");
+      }
+      else disp.setCursor(2, 1);
+      disp.print(avgfhun, 2); // to 2 decimal places
+    }
+    else { // nope, only 10 seconds
+      if (avgften < 10000000) {
+        disp.setCursor(2, 1); disp.print(" ");
+      }
+      else disp.setCursor(2, 1);
+      disp.print(avgften, 1); // to 1 decimal place
+    }
   }
-  else disp.setCursor(2, 1);
-  disp.print(calcfreqint);
-  disp.print(" Hz ");
+  else { // we don't have more data than that
+    if (calcfreqint < 10000000) {
+      disp.setCursor(2, 1); disp.print(" ");
+    }
+    else disp.setCursor(2, 1);
+    disp.print(calcfreqint); // integer
+  }
+  disp.print("Hz ");
 
   // Latitude
   //disp.clearLine(2);
