@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  GPSDO v0.02f by André Balsa, May 2021
+  GPSDO v0.02g by André Balsa, May 2021
   reuses pieces of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
 
   This program is supplied as is, it is up to the user of the program to decide if the program is
@@ -52,7 +52,7 @@
 *******************************************************************************************************/
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.02f"
+#define Program_Version "v0.02g"
 #define Author_Name "André Balsa"
 
 // Define optional modules
@@ -91,10 +91,10 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for s
 
 #include <Adafruit_MCP4725.h>                      // MCP4725 Adafruit library
 Adafruit_MCP4725 dac;
-const uint16_t default_DAC_output = 2557; // this varies from OCXO to OCXO, and with time and temperature
+const uint16_t default_DAC_output = 2545; // this varies from OCXO to OCXO, and with time and temperature
                                           // Some values I have been using:
                                           // 2603 for an ISOTEMP 143-141, determined empirically
-                                          // 2557 for a CTI OSC5A2B02, determined empirically
+                                          // 2545 for a CTI OSC5A2B02, determined empirically
 uint16_t adjusted_DAC_output;             // we adjust this value to "close the loop" of the DFLL
 volatile bool must_adjust_DAC = false;    // true when there is enough data to adjust Vctl
 
@@ -137,6 +137,8 @@ volatile uint8_t  upminutes = 0;
 volatile uint8_t  upseconds = 0;
 volatile uint16_t updays = 0;
 volatile bool halfsecond = false;
+char uptimestr[9] = "00:00:00";    // uptime string
+char updaysstr[5] = "000d";        // updays string
 
 /* OCXO frequency measurement */
 volatile uint32_t fcount=0, previousfcount=0, calcfreqint=10000000;
@@ -286,7 +288,7 @@ void setup()
   disp.setFont(u8x8_font_chroma48medium8_r);
   disp.clear();
   disp.setCursor(0, 0);
-  disp.print(F("GPSDO - v0.02f"));
+  disp.print(F("GPSDO - v0.02g"));
 
   // Initialize I2C again (not sure this is needed, though)
   Wire.begin();
@@ -397,11 +399,14 @@ void loop()
     month = gps.date.month();
     year = gps.date.year();
 
+
     if (must_adjust_DAC) adjustVctlDAC(); // in principle just once every 429 seconds
 
     adcVctl = analogRead(VctlInputPin);
 
-    calcavg(); // calculate frequency averages
+    uptimetostrings();  // get updaysstr and uptimestr
+    
+    calcavg();          // calculate frequency averages
 
     #ifdef GPSDO_BLUETOOTH
     btGPSDOstats();
@@ -482,7 +487,12 @@ bool gpsWaitFix(uint16_t waitSecs)
 void printGPSDOstats() 
 {
   float tempfloat;
-
+  
+  Serial.print(F("Uptime "));
+  Serial.print(updaysstr);
+  Serial.print(F(" "));
+  Serial.println(uptimestr);
+  
   Serial.print(F("New GPS Fix "));
 
   tempfloat = ( (float) GPSHdop / 100);
@@ -585,6 +595,11 @@ void printGPSDOstats()
 void btGPSDOstats() 
 {
   float tempfloat;
+  
+  Serial2.print(F("Uptime "));
+  Serial2.print(updaysstr);
+  Serial2.print(F(" "));
+  Serial2.println(uptimestr);
 
   Serial2.print(F("New GPS Fix "));
 
@@ -739,9 +754,13 @@ void displayscreen1()
   // HDOP
   //disp.clearLine(5);
   disp.setCursor(0, 5);
-  disp.print(F("HDOP "));
-  tempfloat = ((float) GPSHdop / 100);
-  disp.print(tempfloat);
+  // choose HDOP or uptime
+  //disp.print(F("HDOP "));
+  //tempfloat = ((float) GPSHdop / 100);
+  //disp.print(tempfloat);
+  disp.print(updaysstr);
+  disp.print(F(" "));
+  disp.print(uptimestr);
 
   // Time
   //disp.clearLine(6);
@@ -819,4 +838,25 @@ void calcavg() {
     // oldest fcount is always circbuf_ten[cbiten_newest-2]
     // except when cbiten_newest is <2 (zero or 1)
   } 
+}
+
+void uptimetostrings() {
+  // translate uptime variables to strings
+  uptimestr[0] = '0' + uphours / 10;
+  uptimestr[1] = '0' + uphours % 10;
+  uptimestr[3] = '0' + upminutes / 10;
+  uptimestr[4] = '0' + upminutes % 10;
+  uptimestr[6] = '0' + upseconds / 10;
+  uptimestr[7] = '0' + upseconds % 10;
+ 
+  if (updays > 99) { // 100 days or more
+    updaysstr[0] = '0' + updays / 100;
+    updaysstr[1] = '0' + (updays % 100) / 10;
+    updaysstr[2] = '0' + (updays % 100) % 10;
+  }
+  else { // less than 100 days
+    updaysstr[0] = '0';
+    updaysstr[1] = '0' + updays / 10;
+    updaysstr[2] = '0' + updays % 10;
+  }
 }
