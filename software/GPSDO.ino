@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  GPSDO v0.02h by André Balsa, May 2021
+  GPSDO v0.02i by André Balsa, May 2021
   reuses pieces of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
 
   This program is supplied as is, it is up to the user of the program to decide if the program is
@@ -61,7 +61,7 @@
 *******************************************************************************************************/
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.02h"
+#define Program_Version "v0.02i"
 #define Author_Name "André Balsa"
 
 // Define optional modules
@@ -100,11 +100,11 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for s
 
 #include <Adafruit_MCP4725.h>                      // MCP4725 Adafruit library
 Adafruit_MCP4725 dac;
-const uint16_t default_DAC_output = 2380; // this varies from OCXO to OCXO, and with time and temperature
+const uint16_t default_DAC_output = 2382; // this varies from OCXO to OCXO, and with time and temperature
                                           // Some values I have been using:
                                           // 2603 for an ISOTEMP 143-141, determined empirically
                                           // 2549 for a CTI OSC5A2B02, determined empirically
-                                          // 2380 for an NDK ENE3311B, determined empirically
+                                          // 2382 for an NDK ENE3311B, determined empirically
 uint16_t adjusted_DAC_output;             // we adjust this value to "close the loop" of the DFLL
 volatile bool must_adjust_DAC = false;    // true when there is enough data to adjust Vctl
 
@@ -127,6 +127,7 @@ int adcVdd = 0;                      // Vdd is read internally as Vref
 #define BMP280_CS   (PA4)              // SPI1 uses PA4, PA5, PA6, PA7
 Adafruit_BMP280 bmp(BMP280_CS);        // hardware SPI, use PA4 as Chip Select
 const uint16_t PressureOffset = 1360;  // that offset must be calculated for your sensor and location
+float bmp280temp=0.0, bmp280pres=0.0, bmp280alti=0.0; // read sensor, save here
 #endif // BMP280_SPI
 
 // LEDs
@@ -304,7 +305,7 @@ void setup()
   disp.setFont(u8x8_font_chroma48medium8_r);
   disp.clear();
   disp.setCursor(0, 0);
-  disp.print(F("GPSDO - v0.02h"));
+  disp.print(F("GPSDO - v0.02i"));
 
   // Initialize I2C again (not sure this is needed, though)
   Wire.begin();
@@ -427,6 +428,12 @@ void loop()
     #ifdef GPSDO_VDD
     adcVdd = analogRead(AVREF);                      // Vdd is read internally as Vref
     #endif // VDD    
+
+    #ifdef GPSDO_BMP280_SPI
+    bmp280temp = bmp.readTemperature();              // read bmp280 sensor, save values
+    bmp280pres = bmp.readPressure();
+    bmp280alti = bmp.readAltitude();
+    #endif // BMP280_SPI    
 
     uptimetostrings();  // get updaysstr and uptimestr
     
@@ -604,13 +611,13 @@ void printGPSDOstats()
   #ifdef GPSDO_BMP280_SPI
   // BMP280 measurements
   Serial.print(F("BMP280 Temperature = "));
-  Serial.print(bmp.readTemperature(), 1);
+  Serial.print(bmp280temp, 1);
   Serial.println(" *C");
   Serial.print(F("Pressure = "));
-  Serial.print((bmp.readPressure()+PressureOffset)/100, 1);
+  Serial.print((bmp280pres+PressureOffset)/100, 1);
   Serial.println(" hPa");
   Serial.print(F("Approx altitude = "));
-  Serial.print(bmp.readAltitude(), 1); /* Adjusted to local forecast! */
+  Serial.print(bmp280alti, 1); /* Adjusted to local forecast! */
   Serial.println(" m");
   #endif // BMP280_SPI
 
@@ -726,13 +733,13 @@ void btGPSDOstats()
   #ifdef GPSDO_BMP280_SPI
   // BMP280 measurements
   Serial2.print(F("BMP280 Temperature = "));
-  Serial2.print(bmp.readTemperature(), 1);
+  Serial2.print(bmp280temp, 1);
   Serial2.println(" *C");
   Serial2.print(F("Pressure = "));
-  Serial2.print((bmp.readPressure()+PressureOffset)/100, 1);
+  Serial2.print((bmp280pres+PressureOffset)/100, 1);
   Serial2.println(" hPa");
   Serial2.print(F("Approx altitude = "));
-  Serial2.print(bmp.readAltitude(), 1); /* Adjusted to local forecast! */
+  Serial2.print(bmp280alti, 1); /* Adjusted to local forecast! */
   Serial2.println(" m");
   #endif // BMP280_SPI
 
@@ -855,6 +862,13 @@ void displayscreen1()
   disp.print(F("/"));
   disp.print(year);
 
+  #ifdef GPSDO_BMP280_SPI
+  // BMP280 temperature
+  disp.setCursor(10, 6);
+  disp.print(bmp280temp, 1);
+  disp.print(F("C"));
+  #endif // BMP280_SPI
+
   #ifdef GPSDO_VCC
   disp.setCursor(11, 2);
   // Vcc/2 is provided on pin PA0
@@ -869,7 +883,10 @@ void displayscreen1()
   float Vdd = (1.21 * 4096) / float(adcVdd); // from STM32F411CEU6 datasheet                 
   disp.print(Vdd);                           // Vdd = Vref on Black Pill
   disp.print(F("V"));
-  #endif // VDD  
+  #endif // VDD
+
+  disp.setCursor(11, 7); // display DAC value
+  disp.print(adjusted_DAC_output);  
 }
 
 void calcavg() {
