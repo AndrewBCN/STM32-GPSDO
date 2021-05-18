@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  GPSDO v0.02i by André Balsa, May 2021
+  GPSDO v0.02j by André Balsa, May 2021
   reuses pieces of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
 
   This program is supplied as is, it is up to the user of the program to decide if the program is
@@ -51,7 +51,7 @@
 
 
 /*******************************************************************************************************
-  Program Operation -  This program is a GPSDO with optional OLED display. It uses an optional SSD1306
+  Program Operation -  This program is a GPSDO with optional OLED display. It uses a small SSD1306
   128x64 I2C OLED display. At startup the program starts checking the data coming from the GPS for a
   valid fix. It reads the GPS NMEA stream for 5 seconds and if there is no fix, prints a message on the
   Arduino IDE serial monitor and updates the seconds without a fix on the display. During this time the
@@ -60,8 +60,14 @@
   I2C DAC, which is adjusted once every 429 seconds.
 *******************************************************************************************************/
 
+// Enabling the INA219 sensor using the LapINA219 library causes the firmware to lock up after a few minutes
+// I have not identified the cause, it could be the library, or a hardware issue, or I have a bad sensor, etc.
+// Requires further testing with another INA219 sensor, or another library.
+// Note that leaving the INA219 sensor on the I2C bus without otherwise reading from / writing to it, does
+// not cause any lock up.
+
 #define Program_Name "GPSDO"
-#define Program_Version "v0.02i"
+#define Program_Version "v0.02j"
 #define Author_Name "André Balsa"
 
 // Define optional modules
@@ -69,9 +75,10 @@
 #define GPSDO_AHT10           // I2C temperature and humidity sensor
 #define GPSDO_GEN_2kHz        // generate 2kHz square wave test signal on pin PB9 using Timer 4
 #define GPSDO_BMP280_SPI      // SPI atmospheric pressure, temperature and altitude sensor
+// #define GPSDO_INA219          // INA219 I2C current and voltage sensor
 #define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
 #define GPSDO_VCC             // Vcc (nominal 5V) ; reading Vcc requires 1:2 voltage divider to PA0
-#define GPSDO_VDD             // Vdd (nominal 3.3V)
+#define GPSDO_VDD             // Vdd (nominal 3.3V) reads VREF internal ADC channel
 // #define GPSDO_VERBOSE_NMEA    // GPS module NMEA stream echoed to USB serial, Bluetooth serial
 
 // Includes
@@ -94,6 +101,12 @@ TinyGPSPlus gps;                                   // create the TinyGPS++ objec
 #include <Adafruit_AHTX0.h>                        // Adafruit AHTX0 library
 Adafruit_AHTX0 aht;                                // create object aht
 #endif // AHT10
+
+#ifdef GPSDO_INA219
+#include <LapINA219.h>                             // LapINA219 library library
+LapINA219 ina219(0x40);                            // create object ina219 with I2C address 0x40
+float ina219volt=0.0, ina219curr=0.0;
+#endif // INA219
 
 #include <U8x8lib.h>                                      // get library here >  https://github.com/olikraus/u8g2 
 U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for standard 0.96" SSD1306
@@ -305,12 +318,16 @@ void setup()
   disp.setFont(u8x8_font_chroma48medium8_r);
   disp.clear();
   disp.setCursor(0, 0);
-  disp.print(F("GPSDO - v0.02i"));
+  disp.print(F("GPSDO - v0.02j"));
 
   // Initialize I2C again (not sure this is needed, though)
   Wire.begin();
   // try setting a higher I2C clock speed
-  Wire.setClock(400000L);  
+  Wire.setClock(400000L); 
+
+  #ifdef GPSDO_INA219
+  ina219.begin();                           // calibrates ina219 sensor
+  #endif // INA219 
 
   // Setup I2C DAC, read voltage on PB0
   adjusted_DAC_output = default_DAC_output; // initial DAC value
@@ -435,6 +452,11 @@ void loop()
     bmp280alti = bmp.readAltitude();
     #endif // BMP280_SPI    
 
+    #ifdef GPSDO_INA219
+    ina219volt = ina219.busVoltage();                // read ina219 sensor, save values
+    ina219curr = ina219.shuntCurrent();
+    #endif // INA219 
+  
     uptimetostrings();  // get updaysstr and uptimestr
     
     calcavg();          // calculate frequency averages
@@ -449,7 +471,10 @@ void loop()
   }
   else
   {
-    disp.clearLine(1);
+    uint8_t i;
+    for (i=1; i<8; i++) {
+      disp.clearLine(i);
+    }
     disp.setCursor(0, 1);
     disp.print(F("No GPS Fix "));
     disp.print( (millis() - startGetFixmS) / 1000 );
@@ -461,16 +486,28 @@ void loop()
   }
 }
 
-void adjustVctlDAC() // implement more sophisticated algorithm in the future
+void adjustVctlDAC() // slightly more advanced algorithm than previous version
+// This should reach a stable DAC output value / a stable 10000000.00 frequency
+// 10x faster than before
 {
   if (avgfhun >= 10000000.01) {
-    // decrease DAC by one bit
-    adjusted_DAC_output--;
+    if (avgfhun >= 10000000.10) {
+     // decrease DAC by ten bits
+      adjusted_DAC_output = adjusted_DAC_output - 10;
+    } else {
+      // decrease DAC by one bit
+      adjusted_DAC_output--;
+    }
     dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
     must_adjust_DAC = false;
   } else if (avgfhun <= 9999999.99) {
+    if (avgfhun <= 9999999.90) {
+     // increase DAC by ten bits
+      adjusted_DAC_output = adjusted_DAC_output + 10;      
+    } else {
     // increase DAC by one bit
     adjusted_DAC_output++;
+    }
     dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
     must_adjust_DAC = false;
   }
@@ -591,6 +628,16 @@ void printGPSDOstats()
   Serial.println(Vdd);
   #endif // VDD
 
+  #ifdef GPSDO_INA219
+  // current sensor for the OCXO
+  Serial.print(F("OCXO voltage: "));
+  Serial.print(ina219volt, 2);
+  Serial.println(F("V"));
+  Serial.print(F("OCXO current: "));
+  Serial.print(ina219curr, 0);
+  Serial.println(F("mA"));
+  #endif // INA219 
+      
   // OCXO frequency measurements
   Serial.println();
   Serial.print(F("Counter: "));
@@ -807,7 +854,7 @@ void displayscreen1()
   //disp.clearLine(4);
   disp.setCursor(0, 4);
   disp.print(GPSAlt);
-  disp.print(F("m"));
+  disp.print(F("m  "));
   disp.setCursor(9, 4);
   disp.print(F("Sats "));
   disp.print(GPSSats);

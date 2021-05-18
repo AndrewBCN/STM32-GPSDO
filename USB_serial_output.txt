@@ -1,0 +1,22 @@
+Wait GPS Fix 5 seconds
+
+
+Fix time 797mS
+Uptime 000d 00:01:45
+New GPS Fix Lat,48.~~~~~~,Lon,7.~~~~~~,Alt,181.1m,Sats,6,HDOP,3.82,Time,16:26:56,Date,17/5/2021
+
+Vctl: 1.88  DAC: 2382
+Vcc: 4.94
+Vdd: 3.29
+OCXO voltage: 4.97V
+OCXO current: 149mA
+
+Counter: 1032571013 Frequency: 10000000 Hz
+10s Frequency Avg: 10000000.0 Hz
+100s Frequency Avg: 10000000.02 Hz
+BMP280 Temperature = 19.4 *C
+Pressure = 1010.0 hPa
+Approx altitude = 140.9 m
+AHT10 Temperature: 19.59 *C
+Humidity: 68.37% rH
+
