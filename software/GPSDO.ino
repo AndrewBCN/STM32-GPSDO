@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  GPSDO v0.03a by André Balsa, May 2021
+  GPSDO v0.03b by André Balsa, May 2021
   reuses pieces of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
   From version 0.03 includes a command parser, meaning it can receive commands from the USB serial or
   Bluetooth serial interfaces and execute a callback function.
@@ -74,7 +74,7 @@
 // not cause any lock up.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.03a"
+#define Program_Version "v0.03b"
 #define Author_Name "André Balsa"
 
 // Define optional modules
@@ -97,7 +97,8 @@
 #include <SerialCommands.h>                        // Commands parser
 // 32 char buffer, listens on USB serial
 char serial_command_buffer_[32];
-SerialCommands serial_commands_(&Serial, serial_command_buffer_, sizeof(serial_command_buffer_), "\r\n", " ");
+// "\n" below means only newline needed to accept command
+SerialCommands serial_commands_(&Serial, serial_command_buffer_, sizeof(serial_command_buffer_), "\n", " ");
 
 #ifdef GPSDO_BLUETOOTH
 //              UART    RX   TX
@@ -125,11 +126,11 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for s
 
 #include <Adafruit_MCP4725.h>                      // MCP4725 Adafruit library
 Adafruit_MCP4725 dac;
-const uint16_t default_DAC_output = 2382; // this varies from OCXO to OCXO, and with time and temperature
-                                          // Some values I have been using:
-                                          // 2603 for an ISOTEMP 143-141, determined empirically
-                                          // 2549 for a CTI OSC5A2B02, determined empirically
-                                          // 2382 for an NDK ENE3311B, determined empirically
+const uint16_t default_DAC_output = 2420; // this varies from OCXO to OCXO, and with time and temperature
+                                          // Some values I have been using, determined empirically:
+                                          // 2603 for an ISOTEMP 143-141
+                                          // 2549 for a CTI OSC5A2B02
+                                          // 2382 for an NDK ENE3311B
 uint16_t adjusted_DAC_output;             // we adjust this value to "close the loop" of the DFLL
 volatile bool must_adjust_DAC = false;    // true when there is enough data to adjust Vctl
 
@@ -214,7 +215,11 @@ void cmd_unrecognized(SerialCommands* sender, const char* cmd)
 // called for V (version) command
 void cmd_version(SerialCommands* sender)
 {
-  sender->GetSerial()->println("GPSDO - v0.03a by André Balsa");
+  sender->GetSerial()->print(Program_Name);
+  sender->GetSerial()->print(" - ");
+  sender->GetSerial()->print(Program_Version);
+  sender->GetSerial()->print(" by ");
+  sender->GetSerial()->println(Author_Name);
 }
 
 //Note: Commands are case sensitive
@@ -233,7 +238,7 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
 
   fcount = TIM2->CCR3;
   
-  if ((fcount > 4000000000) && (fcount < 4010000000) && halfsecond) must_adjust_DAC = true; else must_adjust_DAC = false; // once every 429s
+  if ((fcount > 4000000000) && (fcount < 4010000000) && halfsecond) must_adjust_DAC = true; // once every 429s
   
   if (fcount < 4280000000) { // if we are way below wraparound value (2^32)
     if (fcount > previousfcount) {  // if we have a new count - that happens once per second
@@ -338,9 +343,6 @@ void setup()
   #endif // BLUETOOTH
 
   Serial.println();
-  Serial.print(F(__TIME__));
-  Serial.print(F(" "));
-  Serial.println(F(__DATE__));
   Serial.println(F(Program_Name));
   Serial.println(F(Program_Version));
   Serial.println();
@@ -352,7 +354,9 @@ void setup()
   disp.setFont(u8x8_font_chroma48medium8_r);
   disp.clear();
   disp.setCursor(0, 0);
-  disp.print(F("GPSDO - v0.03a"));
+  disp.print(F(Program_Name));
+  disp.print(F(" - "));
+  disp.print(F(Program_Version));
 
   // Initialize I2C again (not sure this is needed, though)
   Wire.begin();
@@ -450,8 +454,6 @@ void loop()
   
   if (gpsWaitFix(5)) // wait 5 seconds for fix
   {
-    Serial.println();
-    Serial.println();
     Serial.print(F("Fix time "));
     Serial.print(endFixmS - startGetFixmS);
     Serial.println(F("mS"));
@@ -535,7 +537,7 @@ void adjustVctlDAC() // slightly more advanced algorithm than previous version
       adjusted_DAC_output--;
     }
     dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
-    must_adjust_DAC = false;
+    must_adjust_DAC = false; // clear flag
   } else if (avgfhun <= 9999999.99) {
     if (avgfhun <= 9999999.90) {
      // increase DAC by ten bits
@@ -545,21 +547,22 @@ void adjustVctlDAC() // slightly more advanced algorithm than previous version
     adjusted_DAC_output++;
     }
     dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
-    must_adjust_DAC = false;
+    must_adjust_DAC = false; // clear flag
   }
 }
 
 
 bool gpsWaitFix(uint16_t waitSecs)
 {
-  //waits a specified number of seconds for a fix, returns true for good fix
+  // waits a specified number of seconds for a fix,
+  // returns true as soon as fix available or false on timeout
 
   uint32_t endwaitmS;
   uint8_t GPSchar;
 
-  Serial.print(F("Wait GPS Fix "));
+  Serial.print(F("Wait for GPS fix max. "));
   Serial.print(waitSecs);
-  Serial.println(F(" seconds"));
+  Serial.println(F(" seconds..."));
 
   endwaitmS = millis() + (waitSecs * 1000);
 
