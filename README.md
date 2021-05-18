@@ -20,4 +20,8 @@ I decided to build my own version of a 10MHz GPSDO with the following features:
 - Extensive logging of various operating parameters to allow further software tuning.
 - An optional small OLED displaying room temperature, UTC time, uptime, operating status, measured frequency.
 
+The first breadboard prototype:
 <img src="https://github.com/AndrewBCN/STM32-GPSDO/raw/main/GPSDO_breadboarda.jpg">
+
+In normal operation this is displayed on the small OLED:
+<img src="https://github.com/AndrewBCN/STM32-GPSDO/raw/main/OLEDv002i_expl.jpg">
