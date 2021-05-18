@@ -1,6 +1,8 @@
 /*******************************************************************************************************
-  GPSDO v0.02j by André Balsa, May 2021
+  GPSDO v0.03a by André Balsa, May 2021
   reuses pieces of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
+  From version 0.03 includes a command parser, meaning it can receive commands from the USB serial or
+  Bluetooth serial interfaces and execute a callback function.
 
   This program is supplied as is, it is up to the user of the program to decide if the program is
   suitable for the intended purpose and free from errors.
@@ -46,9 +48,14 @@
     - Adafruit AHTX0
     - Adafruit BMP280
 
+    For commands parsing, uses SerialCommands library found here:
+    https://github.com/ppedro74/Arduino-SerialCommands
+
    And also requires the installation of support for the STM32 MCUs by installing the STM32duino
    package (STM32 core version 2.0.0 or later).
-
+*******************************************************************************************************/
+/* Commands implemented:
+    - V : returns program name, version and author
 
 /*******************************************************************************************************
   Program Operation -  This program is a GPSDO with optional OLED display. It uses a small SSD1306
@@ -67,7 +74,7 @@
 // not cause any lock up.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.02j"
+#define Program_Version "v0.03a"
 #define Author_Name "André Balsa"
 
 // Define optional modules
@@ -86,6 +93,11 @@
 #if !defined(STM32_CORE_VERSION) || (STM32_CORE_VERSION  < 0x02000000)
 #error "Due to API change, this sketch is compatible with STM32_CORE_VERSION  >= 0x02000000"
 #endif
+
+#include <SerialCommands.h>                        // Commands parser
+// 32 char buffer, listens on USB serial
+char serial_command_buffer_[32];
+SerialCommands serial_commands_(&Serial, serial_command_buffer_, sizeof(serial_command_buffer_), "\r\n", " ");
 
 #ifdef GPSDO_BLUETOOTH
 //              UART    RX   TX
@@ -190,6 +202,24 @@ volatile uint32_t cbihun_newest=0;
 volatile bool cbTen_full=false, cbHun_full=false;  // flag when buffer full
 double avgften=0, avgfhun=0; // average frequency calculated once the buffer is full
 
+// SerialCommands callback functions
+// This is the default handler, and gets called when no other command matches. 
+void cmd_unrecognized(SerialCommands* sender, const char* cmd)
+{
+  sender->GetSerial()->print("Unrecognized command [");
+  sender->GetSerial()->print(cmd);
+  sender->GetSerial()->println("]");
+}
+
+// called for V (version) command
+void cmd_version(SerialCommands* sender)
+{
+  sender->GetSerial()->println("GPSDO - v0.03a by André Balsa");
+}
+
+//Note: Commands are case sensitive
+SerialCommand cmd_version_("V", cmd_version);
+
 
 // Interrupt Service Routine for the 2Hz timer
 void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the ISR
@@ -281,6 +311,10 @@ void logfcount() // called once per second from ISR to update all the ring buffe
 
 void setup()
 {
+  // setup commands parser
+  serial_commands_.SetDefaultHandler(cmd_unrecognized);
+  serial_commands_.AddCommand(&cmd_version_);
+    
   // Setup 2Hz Timer
   HardwareTimer *tim2Hz = new HardwareTimer(TIM9);
   
@@ -318,7 +352,7 @@ void setup()
   disp.setFont(u8x8_font_chroma48medium8_r);
   disp.clear();
   disp.setCursor(0, 0);
-  disp.print(F("GPSDO - v0.02j"));
+  disp.print(F("GPSDO - v0.03a"));
 
   // Initialize I2C again (not sure this is needed, though)
   Wire.begin();
@@ -412,6 +446,8 @@ void pinModeAF(int ulPin, uint32_t Alternate)
 
 void loop()
 {
+  serial_commands_.ReadSerial();  // process any command from USB serial (Arduino monitor)
+  
   if (gpsWaitFix(5)) // wait 5 seconds for fix
   {
     Serial.println();
