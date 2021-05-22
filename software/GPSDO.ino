@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  GPSDO v0.03b by André Balsa, May 2021
+  GPSDO v0.03e by André Balsa, May 2021
   reuses pieces of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
   From version 0.03 includes a command parser, meaning it can receive commands from the USB serial or
   Bluetooth serial interfaces and execute a callback function.
@@ -56,6 +56,12 @@
 *******************************************************************************************************/
 /* Commands implemented:
     - V : returns program name, version and author
+    - L0 to L9 : select log levels
+    - L0 : silence mode
+    - L1 : fix only mode
+    - L7 : fix and full status mode, no NMEA (default)
+    - L8 : NMEA stream from GPS module only mode
+    - L9 : NMEA + full status
 
 /*******************************************************************************************************
   Program Operation -  This program is a GPSDO with optional OLED display. It uses a small SSD1306
@@ -74,7 +80,7 @@
 // not cause any lock up.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.03b"
+#define Program_Version "v0.03e"
 #define Author_Name "André Balsa"
 
 // Define optional modules
@@ -83,10 +89,11 @@
 #define GPSDO_GEN_2kHz        // generate 2kHz square wave test signal on pin PB9 using Timer 4
 #define GPSDO_BMP280_SPI      // SPI atmospheric pressure, temperature and altitude sensor
 // #define GPSDO_INA219          // INA219 I2C current and voltage sensor
-#define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
-#define GPSDO_VCC             // Vcc (nominal 5V) ; reading Vcc requires 1:2 voltage divider to PA0
+// #define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
+// #define GPSDO_VCC             // Vcc (nominal 5V) ; reading Vcc requires 1:2 voltage divider to PA0
 #define GPSDO_VDD             // Vdd (nominal 3.3V) reads VREF internal ADC channel
 // #define GPSDO_VERBOSE_NMEA    // GPS module NMEA stream echoed to USB serial, Bluetooth serial
+#define COUNT_64_TEST         // testing 64-bit counter
 
 // Includes
 // --------
@@ -126,11 +133,12 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for s
 
 #include <Adafruit_MCP4725.h>                      // MCP4725 Adafruit library
 Adafruit_MCP4725 dac;
-const uint16_t default_DAC_output = 2420; // this varies from OCXO to OCXO, and with time and temperature
+const uint16_t default_DAC_output = 2180; // this varies from OCXO to OCXO, and with time and temperature
                                           // Some values I have been using, determined empirically:
                                           // 2603 for an ISOTEMP 143-141
                                           // 2549 for a CTI OSC5A2B02
                                           // 2382 for an NDK ENE3311B
+                                          // 2180 for a second NDK ENE3311B
 uint16_t adjusted_DAC_output;             // we adjust this value to "close the loop" of the DFLL
 volatile bool must_adjust_DAC = false;    // true when there is enough data to adjust Vctl
 
@@ -183,8 +191,16 @@ volatile bool halfsecond = false;
 char uptimestr[9] = "00:00:00";    // uptime string
 char updaysstr[5] = "000d";        // updays string
 
-// OCXO frequency measurement 
-volatile uint32_t fcount=0, previousfcount=0, calcfreqint=10000000;
+// OCXO frequency measurement
+volatile uint32_t msfcount=0, lsfcount=0, previousfcount=0, calcfreqint=10000000;
+
+#ifdef COUNT_64_TEST
+volatile uint64_t fcount64=0, prevfcount64=0, calcfreq64=10000000; 
+volatile uint32_t tim2overflowcounter = 0;  // testing, counts the number of times TIM2 overflows
+
+volatile uint64_t circbuf_ten64[11]; // 10+1 seconds circular buffer
+volatile uint64_t circbuf_hun64[101]; // 100+1 seconds circular buffer
+#endif // COUNT_64_TEST
 
 /* Moving average frequency variables
    Basically we store the counter captures for 10 and 100 seconds.
@@ -196,12 +212,14 @@ volatile uint32_t fcount=0, previousfcount=0, calcfreqint=10000000;
  */
 volatile uint32_t circbuf_ten[11]; // 10+1 seconds circular buffer
 volatile uint32_t circbuf_hun[101]; // 100+1 seconds circular buffer
+volatile uint32_t circbuf_tho[1001]; // 1000+1 seconds circular buffer
 
 volatile uint32_t cbiten_newest=0; // index to oldest, newest data
 volatile uint32_t cbihun_newest=0;
+volatile uint32_t cbitho_newest=0;
 
-volatile bool cbTen_full=false, cbHun_full=false;  // flag when buffer full
-double avgften=0, avgfhun=0; // average frequency calculated once the buffer is full
+volatile bool cbTen_full=false, cbHun_full=false, cbTho_full=false;  // flag when buffer full
+double avgften=0, avgfhun=0, avgftho=0; // average frequency calculated once the buffer is full
 
 // SerialCommands callback functions
 // This is the default handler, and gets called when no other command matches. 
@@ -225,6 +243,17 @@ void cmd_version(SerialCommands* sender)
 //Note: Commands are case sensitive
 SerialCommand cmd_version_("V", cmd_version);
 
+// loglevel
+uint8_t loglevel = 7;   // see commands comments for log level definitions, default is 7
+
+#ifdef COUNT_64_TEST
+// Interrupt Service Routine for TIM2 counter overflow / wraparound
+void Timer2_Overflow_ISR(void)
+{
+  tim2overflowcounter++;
+  // do we have to manually clear the UIF bit in TIM2 status register? It seems so...
+}
+#endif // COUNT_64_TEST
 
 // Interrupt Service Routine for the 2Hz timer
 void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the ISR
@@ -236,25 +265,41 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
 
   // read TIM2->CCR3 twice per second and if it has changed, calculate OCXO frequency
 
-  fcount = TIM2->CCR3;
+  lsfcount = TIM2->CCR3;
+
+  #ifdef COUNT_64_TEST
+  fcount64 = (tim2overflowcounter << 32) + lsfcount; // hehe now we have a 64-bit counter
   
-  if ((fcount > 4000000000) && (fcount < 4010000000) && halfsecond) must_adjust_DAC = true; // once every 429s
+  if ((lsfcount > 4000000000) && (lsfcount < 4010000000) && halfsecond) must_adjust_DAC = true; // once every 429s
   
-  if (fcount < 4280000000) { // if we are way below wraparound value (2^32)
-    if (fcount > previousfcount) {  // if we have a new count - that happens once per second
-      if (((fcount - previousfcount) > 9999800) && ((fcount - previousfcount) < 10000200)) { // if we have a valid fcount, otherwise it's discarded
+  if (fcount64 > prevfcount64) {  // if we have a new count - that happens once per second
+    if (((fcount64 - prevfcount64) > 9999500) && ((fcount64 - prevfcount64) < 10000500)) { // if we have a valid fcount, otherwise it's discarded
+      logfcount64();  // save fcount in the 64-bit ring buffers
+      calcfreq64 = fcount64 - prevfcount64; // the difference is exactly the OCXO frequency in Hz
+    }
+    prevfcount64 = fcount64;
+  } // there is no need to consider the case where fcount64 wraps around
+  
+  #else // if COUNT_64_TEST is not defined 
+  
+  if ((lsfcount > 4000000000) && (lsfcount < 4010000000) && halfsecond) must_adjust_DAC = true; // once every 429s
+  
+  if (lsfcount < 4280000000) { // if we are way below wraparound value (2^32)
+    if (lsfcount > previousfcount) {  // if we have a new count - that happens once per second
+      if (((lsfcount - previousfcount) > 9999500) && ((lsfcount - previousfcount) < 10000500)) { // if we have a valid fcount, otherwise it's discarded
         logfcount();  // save fcount in the ring buffers
-        calcfreqint = fcount - previousfcount; // the difference is exactly the OCXO frequency in Hz
+        calcfreqint = lsfcount - previousfcount; // the difference is exactly the OCXO frequency in Hz
         // previousfcount = fcount;
       }
-      previousfcount = fcount;
+      previousfcount = lsfcount;
     }
   } else { // prepare for wraparound every 429 seconds
     TIM2->CCR3 = 0x0; // clear CCR3 (no need to stop counter), perhaps this is not needed
     cbTen_full=false; cbHun_full=false; // we also need to refill the ring buffers
     cbiten_newest=0; cbihun_newest=0;
     previousfcount = 0;
-  }                           
+  }
+  #endif // COUNT_64_TEST                           
 
   switch (yellow_led_state)
   {
@@ -295,24 +340,43 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
   }  
 }
 
-void logfcount() // called once per second from ISR to update all the ring buffers
+#ifdef COUNT_64_TEST
+void logfcount64() // called once per second from ISR to update all the ring buffers
 {
   // 10 seconds buffer
-  circbuf_ten[cbiten_newest]=fcount;
+  circbuf_ten64[cbiten_newest]=fcount64;
   cbiten_newest++;
   if (cbiten_newest > 10) {
      cbTen_full=true; // that only needs to happen once, when the buffer fills up for the first time
      cbiten_newest = 0;   // (wrap around)
   }
   // 100 seconds buffer
-  circbuf_hun[cbihun_newest]=fcount;
+  circbuf_hun64[cbihun_newest]=fcount64;
   cbihun_newest++;
   if (cbihun_newest > 100) {
      cbHun_full=true; // that only needs to happen once, when the buffer fills up for the first time
      cbihun_newest = 0;   // (wrap around)
   }
 }
-
+#else // if COUNT_64_TEST is not defined
+void logfcount() // called once per second from ISR to update all the ring buffers
+{
+  // 10 seconds buffer
+  circbuf_ten[cbiten_newest]=lsfcount;
+  cbiten_newest++;
+  if (cbiten_newest > 10) {
+     cbTen_full=true; // that only needs to happen once, when the buffer fills up for the first time
+     cbiten_newest = 0;   // (wrap around)
+  }
+  // 100 seconds buffer
+  circbuf_hun[cbihun_newest]=lsfcount;
+  cbihun_newest++;
+  if (cbihun_newest > 100) {
+     cbHun_full=true; // that only needs to happen once, when the buffer fills up for the first time
+     cbihun_newest = 0;   // (wrap around)
+  }
+}
+#endif // COUNT_64_TEST
 
 void setup()
 {
@@ -382,11 +446,11 @@ void setup()
   Serial.println("AHT10 found");
   #endif // AHT10
 
-  #ifdef GPSDO_GEN_2kHz
-  // generate a test 2kHz square wave on PB9 PWM pin - because we can and Timer 4 is available
+  // generate a test 2kHz square wave on PB9 PWM pin, using Timer 4 channel 4
+  // PB9 is Timer 4 Channel 4 from Arduino_Core_STM32/variants/STM32F4xx/F411C(C-E)(U-Y)/PeripheralPins_BLACKPILL_F411CE.c
   analogWriteFrequency(2000); // default PWM frequency is 1kHz, change it to 2kHz
-  analogWrite(PB9, 127); // 127 means 50% duty cycle so a square wave
-  #endif // GEN_2kHz
+  analogWriteResolution(16);  // set PWM resolution to 16 bits (the maximum for the STM32F411CEU6)
+  analogWrite(PB9, 32767);    // 127 for 8 bits, 32767 for 16 bits means 50% duty cycle so a square wave
 
   #ifdef GPSDO_BMP280_SPI
   // Initialize BMP280
@@ -426,6 +490,11 @@ void setup()
 
   // Configure 32-bit auto-reload register (ARR) with maximum possible value
   TIM2->ARR = 0xffffffff; // count to 2^32, then wraparound (approximately every 429 seconds)
+
+  #ifdef COUNT_64_TEST
+  // Configure the ISR for the timer overflow interrupt
+  FreqMeasTim->attachInterrupt(Timer2_Overflow_ISR);
+  #endif // COUNT_64_TEST
 
   // select external clock source mode 2 by writing ECE=1 in the TIM2_SMCR register
   TIM2->SMCR |= TIM_SMCR_ECE; // 0x4000
@@ -507,20 +576,28 @@ void loop()
     displayscreen1();
     startGetFixmS = millis();    //have a fix, next thing that happens is checking for a fix, so restart timer
   }
-  else
+  else // no GPS fix could be acquired for the last five seconds
   {
-    uint8_t i;
+    uint8_t i; // clear the display except for program name
     for (i=1; i<8; i++) {
       disp.clearLine(i);
     }
     disp.setCursor(0, 1);
-    disp.print(F("No GPS Fix "));
+    disp.print(F("Wait fix "));
     disp.print( (millis() - startGetFixmS) / 1000 );
+    disp.print(F("s"));
+    
     Serial.println();
-    Serial.println();
-    Serial.print(F("Timeout - No GPS Fix "));
+    Serial.print(F("Waiting for GPS Fix "));
     Serial.print( (millis() - startGetFixmS) / 1000 );
     Serial.println(F("s"));
+
+    #ifdef GPSDO_BLUETOOTH
+    Serial2.println();
+    Serial2.print(F("Waiting for GPS Fix "));
+    Serial2.print( (millis() - startGetFixmS) / 1000 );
+    Serial2.println(F("s"));
+    #endif // BLUETOOTH
   }
 }
 
@@ -679,6 +756,24 @@ void printGPSDOstats()
       
   // OCXO frequency measurements
   Serial.println();
+  #ifdef COUNT_64_TEST
+  Serial.println(F("Using 64-bit counter implemented in software"));
+  Serial.print(F("Most Significant 32-bit Count (OverflowCounter): "));
+  Serial.println(tim2overflowcounter);
+  Serial.print(F("Least Significant 32-bit Count (TIM2->CCR3): "));
+  Serial.print(fcount64);
+  Serial.print(F(" Frequency: "));
+  Serial.print(calcfreq64);
+  Serial.print(F(" Hz"));
+  Serial.println();
+  Serial.print("10s Frequency Avg: ");
+  Serial.print(avgften,1);
+  Serial.print(F(" Hz"));
+  Serial.println();
+  Serial.print("100s Frequency Avg: ");
+  Serial.print(avgfhun,2);
+  Serial.print(F(" Hz"));
+  #else // if COUNT_64_TEST is not defined
   Serial.print(F("Counter: "));
   Serial.print(TIM2->CCR3);
   Serial.print(F(" Frequency: "));
@@ -692,6 +787,7 @@ void printGPSDOstats()
   Serial.print("100s Frequency Avg: ");
   Serial.print(avgfhun,2);
   Serial.print(F(" Hz"));
+  #endif // COUNT_64_TEST
   Serial.println(); 
 
   #ifdef GPSDO_BMP280_SPI
@@ -873,6 +969,9 @@ void displayscreen1()
     }
   }
   else { // we don't have any averages
+    #ifdef COUNT_64_TEST
+    calcfreqint = calcfreq64; // convert to 32-bit integer
+    #endif // COUNT_64_TEST
     if (calcfreqint < 10000000) {
       disp.setCursor(2, 1); disp.print(" ");
     }
@@ -975,6 +1074,46 @@ void displayscreen1()
   disp.print(adjusted_DAC_output);  
 }
 
+#ifdef COUNT_64_TEST
+void calcavg() {
+  // Calculate the OCXO frequency to 1 or 2 decimal places only when the respective buffers are full
+  
+  if (cbTen_full) { // we want (latest fcount - oldest fcount) / 10
+    
+    uint64_t latfcount64, oldfcount64; // latest fcount, oldest fcount stored in ring buffer
+
+    // latest fcount is always circbuf_ten[cbiten_newest-1]
+    // except when cbiten_newest is zero
+    // oldest fcount is always circbuf_ten[cbiten_newest] when buffer is full
+
+    if (cbiten_newest == 0) latfcount64 = circbuf_ten64[10];
+    else latfcount64 = circbuf_ten64[cbiten_newest-1];
+    oldfcount64 = circbuf_ten64[cbiten_newest];
+    
+    avgften = double(latfcount64 - oldfcount64)/10.0;
+    // oldest fcount is always circbuf_ten[cbiten_newest-2]
+    // except when cbiten_newest is <2 (zero or 1)
+    
+  }
+   
+  if (cbHun_full) { // we want (latest fcount - oldest fcount) / 100
+    
+    uint64_t latfcount64, oldfcount64;
+
+    // latest fcount is always circbuf_hun[cbihun_newest-1]
+    // except when cbihun_newest is zero
+    // oldest fcount is always circbuf_hun[cbihun_newest] when buffer is full
+
+    if (cbihun_newest == 0) latfcount64 = circbuf_hun64[100];
+    else latfcount64 = circbuf_hun64[cbihun_newest-1];
+    oldfcount64 = circbuf_hun64[cbihun_newest];
+    
+    avgfhun = double(latfcount64 - oldfcount64)/100.0;
+    // oldest fcount is always circbuf_ten[cbiten_newest-2]
+    // except when cbiten_newest is <2 (zero or 1)
+  } 
+}
+#else // if COUNT_64_TEST is not defined
 void calcavg() {
   // Calculate the OCXO frequency to 1 or 2 decimal places only when the respective buffers are full
   
@@ -1013,6 +1152,7 @@ void calcavg() {
     // except when cbiten_newest is <2 (zero or 1)
   } 
 }
+#endif // COUNT_64_TEST
 
 void uptimetostrings() {
   // translate uptime variables to strings
