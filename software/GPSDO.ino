@@ -1,8 +1,10 @@
 /*******************************************************************************************************
-  GPSDO v0.03i by André Balsa, May 2021
-  reuses small parts of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
-  From version 0.03 includes a command parser, meaning it can receive commands from the USB serial or
-  Bluetooth serial interfaces and execute a callback function.
+  STM32 GPSDO v0.04a by André Balsa, May 2021
+  GPLV3 license
+  Reuses small bits of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
+  From version 0.03 includes a command parser, so the GPSDO can receive commands from the USB serial or
+  Bluetooth serial interfaces and execute various callback functions.
+  From version 0.04 includes an auto-calibration function.
 
   This program is supplied as is, it is up to the user of the program to decide if the program is
   suitable for the intended purpose and free from errors.
@@ -11,27 +13,28 @@
 // GPSDO with optional I2C SSD1306 display, STM32 MCU, DFLL in software
 
 /*******************************************************************************************************
-  Program Operation -  This Arduino sketch implements a GPSDO with display option. It uses an SSD1306 
-  128x64 I2C OLED display. It reads the GPS for 5 seconds and copies the characters from the GPS
-  to the serial monitor, this is an example printout from a working GPS that has just been powered on;
+  This Arduino with STM32 Core package sketch implements a GPSDO with display option. It uses an SSD1306 
+  128x64 I2C OLED display. It reads the GPS for 5 seconds and if verbose mode is enabled, copies the
+  NMEA sentences from the GPS to the serial monitor, this is an example printout from a working GPS that
+  has just been powered on;
    
-  GPSDO Starting
-  Wait GPS Fix 5 seconds
-  Timeout - No GPS Fix 5s
-  Wait GPS Fix 5 seconds
-  $PGACK,103*40
-  $PGACK,105*46
-  $PMTK011,MTKGPS*08
-  $PMTK010,001*2E
-  $PMTK010,00æ*2D
-  $GPGGA,235942.800,,,,,0,0,,,M,,M,,*4B
-  $GPGSA,A,1,,,,,,,,,,,,,,,*1E
-  $GPRMC,235942.800,V,,,,,0.00,0.00,050180,,,N*42
-  $GPVTG,0.00,T,,M,0.00,N,0.00,K,N*32
-  $GPGSV,1,1,03,30,,,43,07,,,43,05,,,38*70
-
-  Timeout - No GPS Fix 5s
-  Wait GPS Fix 5 seconds
+    GPSDO Starting
+    Wait GPS Fix 5 seconds
+    Timeout - No GPS Fix 5s
+    Wait GPS Fix 5 seconds
+    $PGACK,103*40
+    $PGACK,105*46
+    $PMTK011,MTKGPS*08
+    $PMTK010,001*2E
+    $PMTK010,00æ*2D
+    $GPGGA,235942.800,,,,,0,0,,,M,,M,,*4B
+    $GPGSA,A,1,,,,,,,,,,,,,,,*1E
+    $GPRMC,235942.800,V,,,,,0.00,0.00,050180,,,N*42
+    $GPVTG,0.00,T,,M,0.00,N,0.00,K,N*32
+    $GPGSV,1,1,03,30,,,43,07,,,43,05,,,38*70
+  
+    Timeout - No GPS Fix 5s
+    Wait GPS Fix 5 seconds
 
   That printout is from a Meadiatek GPS, the Ublox ones are similar. The data from the GPS is also fed into
   the TinyGPS++ library and if there is no fix a message is printed on the serial monitor.
@@ -84,7 +87,7 @@
 // not cause any lock up.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.03i"
+#define Program_Version "v0.04a"
 #define Author_Name "André Balsa"
 
 // Define optional modules
@@ -96,6 +99,7 @@
 // #define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
 #define GPSDO_VCC             // Vcc (nominal 5V) ; reading Vcc requires 1:2 voltage divider to PA0
 #define GPSDO_VDD             // Vdd (nominal 3.3V) reads VREF internal ADC channel
+#define GPSDO_CALIBRATION     // auto-calibration is enabled
 // #define GPSDO_VERBOSE_NMEA    // GPS module NMEA stream echoed to USB serial, Bluetooth serial
 
 // Includes
@@ -104,7 +108,13 @@
 #error "Due to API change, this sketch is compatible with STM32_CORE_VERSION  >= 0x02000000"
 #endif
 
-#include <SerialCommands.h>                        // Commands parser
+// Increase HardwareSerial (UART) TX and RX buffer sizes from default 64 characters to 256.
+// The main worry here is that we could miss some characters from the u-blox GPS module if
+// the processor is busy doing something else (e.g. updating the display, reading a sensor, etc).
+#define SERIAL_TX_BUFFER_SIZE 256 // Warning: > 256 could cause problems, see comments in library
+#define SERIAL_RX_BUFFER_SIZE 256
+
+#include <SerialCommands.h>                        // Commands parser library
 // 32 char buffer, listens on USB serial
 char serial_command_buffer_[32];
 // "\n" below means only newline needed to accept command
@@ -119,7 +129,7 @@ HardwareSerial Serial2(PA3, PA2);                  // Serial connection to HC-06
 TinyGPSPlus gps;                                   // create the TinyGPS++ object
 
 #include <Wire.h>                                  // Hardware I2C library on STM32
-
+                                                   // Uses PB6 (SCL1) and PB7 (SDA1) on Black Pill
 #ifdef GPSDO_AHT10
 #include <Adafruit_AHTX0.h>                        // Adafruit AHTX0 library
 Adafruit_AHTX0 aht;                                // create object aht
@@ -231,7 +241,8 @@ volatile uint32_t cbitth_newest=0;
 
 volatile bool cbTen_full=false, cbHun_full=false, cbTho_full=false, cbTth_full=false;  // flag when buffer full
 volatile double avgften=0, avgfhun=0, avgftho=0, avgftth=0; // average frequency calculated once the buffer is full
-volatile bool flush_ring_buffers_flag = true;
+volatile bool flush_ring_buffers_flag = true;  // indicates ring buffers should be flushed
+volatile bool begin_calibration_flag = true;   // indicates GPSDO should start calibration sequence
 
 // SerialCommands callback functions
 // This is the default handler, and gets called when no other command matches. 
@@ -257,6 +268,13 @@ void cmd_flush(SerialCommands* sender)
 {
   flush_ring_buffers_flag = true;  // ring buffers will be flushed inside interrupt routine
   sender->GetSerial()->println("Ring buffers flushed");
+}
+
+// called for C (calibration) command
+void cmd_calibrate(SerialCommands* sender)
+{
+  begin_calibration_flag = true;  // starts auto-calibration sequence
+  sender->GetSerial()->println("Auto-calibration sequence started");
 }
 
 // called for up10 (increase PWM 10 bits) command
@@ -320,6 +338,7 @@ void cmd_dd1(SerialCommands* sender)
 //Note: Commands are case sensitive
 SerialCommand cmd_version_("V", cmd_version);
 SerialCommand cmd_flush_("F", cmd_flush);
+SerialCommand cmd_calibrate_("C", cmd_calibrate);
 // coarse adjust
 SerialCommand cmd_up10_("up10", cmd_up10);
 SerialCommand cmd_ud10_("ud10", cmd_ud10);
@@ -550,6 +569,7 @@ void setup()
   serial_commands_.SetDefaultHandler(cmd_unrecognized);
   serial_commands_.AddCommand(&cmd_version_);
   serial_commands_.AddCommand(&cmd_flush_);
+  serial_commands_.AddCommand(&cmd_calibrate_);
   
   serial_commands_.AddCommand(&cmd_up10_);
   serial_commands_.AddCommand(&cmd_ud10_);
