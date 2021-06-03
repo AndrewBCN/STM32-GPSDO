@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  STM32 GPSDO v0.04a by André Balsa, May 2021
+  STM32 GPSDO v0.04b by André Balsa, May 2021
   GPLV3 license
   Reuses small bits of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
   From version 0.03 includes a command parser, so the GPSDO can receive commands from the USB serial or
@@ -15,8 +15,9 @@
 /*******************************************************************************************************
   This Arduino with STM32 Core package sketch implements a GPSDO with display option. It uses an SSD1306 
   128x64 I2C OLED display. It reads the GPS for 5 seconds and if verbose mode is enabled, copies the
-  NMEA sentences from the GPS to the serial monitor, this is an example printout from a working GPS that
-  has just been powered on;
+  NMEA sentences from the GPS to either the USB serial or Bluetooth serial ports (but not both) if
+  verbose mode is enabled.
+  This is an example printout from a working GPS that has just been powered on;
    
     GPSDO Starting
     Wait GPS Fix 5 seconds
@@ -40,10 +41,11 @@
   the TinyGPS++ library and if there is no fix a message is printed on the serial monitor.
 
   When the program detects that the GPS has a fix, it prints the Latitude, Longitude, Altitude, Number
-  of satellites in use, the HDOP value, time and date to the serial monitor. If the I2C OLED display is
-  attached that is updated as well.
+  of satellites in use, the HDOP value, time and date to the USB serial xor the Bluetooth serial (if the
+  Bluetooth serial port is defined in the preprocessor directives). If the I2C OLED display is attached
+  that is updated as well.
 
-  Serial monitor baud rate is set at 115200.
+  Both the USB serial and Bluetooth serial ports are set at 115200 baud.
 *******************************************************************************************************/
 /* Libraries required to compile:
     - TinyGPS++
@@ -87,7 +89,7 @@
 // not cause any lock up.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.04a"
+#define Program_Version "v0.04b"
 #define Author_Name "André Balsa"
 
 // Define optional modules
@@ -96,7 +98,7 @@
 #define GPSDO_GEN_2kHz        // generate 2kHz square wave test signal on pin PB9 using Timer 4
 #define GPSDO_BMP280_SPI      // SPI atmospheric pressure, temperature and altitude sensor
 // #define GPSDO_INA219          // INA219 I2C current and voltage sensor
-// #define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
+#define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
 #define GPSDO_VCC             // Vcc (nominal 5V) ; reading Vcc requires 1:2 voltage divider to PA0
 #define GPSDO_VDD             // Vdd (nominal 3.3V) reads VREF internal ADC channel
 #define GPSDO_CALIBRATION     // auto-calibration is enabled
@@ -114,15 +116,20 @@
 #define SERIAL_TX_BUFFER_SIZE 256 // Warning: > 256 could cause problems, see comments in library
 #define SERIAL_RX_BUFFER_SIZE 256
 
-#include <SerialCommands.h>                        // Commands parser library
-// 32 char buffer, listens on USB serial
-char serial_command_buffer_[32];
-// "\n" below means only newline needed to accept command
-SerialCommands serial_commands_(&Serial, serial_command_buffer_, sizeof(serial_command_buffer_), "\n", " ");
-
 #ifdef GPSDO_BLUETOOTH
 //              UART    RX   TX
 HardwareSerial Serial2(PA3, PA2);                  // Serial connection to HC-06 Bluetooth module
+#endif // BLUETOOTH
+#define BT_BAUD 57600                              // Bluetooth baud rate
+
+#include <SerialCommands.h>                        // Commands parser library
+char serial_command_buffer_[32];                   // buffer for commands library
+// The following line determines which serial port we'll listen to
+// "\n" means only newline needed to accept command
+#ifdef GPSDO_BLUETOOTH
+SerialCommands serial_commands_(&Serial2, serial_command_buffer_, sizeof(serial_command_buffer_), "\n", " ");
+#else
+SerialCommands serial_commands_(&Serial, serial_command_buffer_, sizeof(serial_command_buffer_), "\n", " ");
 #endif // BLUETOOTH
 
 #include <TinyGPS++.h>                             // get library here > http://arduiniana.org/libraries/tinygpsplus/
@@ -146,11 +153,11 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for s
 
 #include <Adafruit_MCP4725.h>              // MCP4725 12-bit DAC Adafruit library
 Adafruit_MCP4725 dac;
-const uint16_t default_DAC_output = 2380; // 12-bit value, varies from OCXO to OCXO, and with time and temperature
+const uint16_t default_DAC_output = 2400; // 12-bit value, varies from OCXO to OCXO, and with aging and temperature
                                           // Some values I have been using, determined empirically:
                                           // 2603 for an ISOTEMP 143-141
                                           // 2549 for a CTI OSC5A2B02
-                                          // 2382 for an NDK ENE3311B
+                                          // 2400 for an NDK ENE3311B
                                           // 2180 for a second NDK ENE3311B
 const uint16_t default_PWM_output = 35585; // "ideal" 16-bit PWM value, varies with OCXO, RC network, and time and temperature
                                            // 35585 for a second NDK ENE3311B                                        
@@ -565,22 +572,7 @@ void flushringbuffers(void) {
 
 void setup()
 {
-  // setup commands parser
-  serial_commands_.SetDefaultHandler(cmd_unrecognized);
-  serial_commands_.AddCommand(&cmd_version_);
-  serial_commands_.AddCommand(&cmd_flush_);
-  serial_commands_.AddCommand(&cmd_calibrate_);
-  
-  serial_commands_.AddCommand(&cmd_up10_);
-  serial_commands_.AddCommand(&cmd_ud10_);
-  serial_commands_.AddCommand(&cmd_dp10_);
-  serial_commands_.AddCommand(&cmd_dd10_);  
-  
-  serial_commands_.AddCommand(&cmd_up1_);
-  serial_commands_.AddCommand(&cmd_ud1_);
-  serial_commands_.AddCommand(&cmd_dp1_);
-  serial_commands_.AddCommand(&cmd_dd1_);
-    
+   
   // Setup 2Hz Timer
   HardwareTimer *tim2Hz = new HardwareTimer(TIM9);
   
@@ -600,9 +592,25 @@ void setup()
   #ifdef GPSDO_BLUETOOTH
   // HC-06 module baud rate factory setting is 9600, 
   // use separate program to set baud rate to 115200
-  Serial2.begin(115200);
+  Serial2.begin(BT_BAUD);
   #endif // BLUETOOTH
 
+  // setup commands parser
+  serial_commands_.SetDefaultHandler(cmd_unrecognized);
+  serial_commands_.AddCommand(&cmd_version_);
+  serial_commands_.AddCommand(&cmd_flush_);
+  serial_commands_.AddCommand(&cmd_calibrate_);
+  
+  serial_commands_.AddCommand(&cmd_up10_);
+  serial_commands_.AddCommand(&cmd_ud10_);
+  serial_commands_.AddCommand(&cmd_dp10_);
+  serial_commands_.AddCommand(&cmd_dd10_);  
+  
+  serial_commands_.AddCommand(&cmd_up1_);
+  serial_commands_.AddCommand(&cmd_ud1_);
+  serial_commands_.AddCommand(&cmd_dp1_);
+  serial_commands_.AddCommand(&cmd_dd1_);
+ 
   Serial.println();
   Serial.println(F(Program_Name));
   Serial.println(F(Program_Version));
@@ -722,9 +730,9 @@ void pinModeAF(int ulPin, uint32_t Alternate)
 
 void loop()
 {
-  serial_commands_.ReadSerial();  // process any command from USB serial (Arduino monitor)
+  serial_commands_.ReadSerial();  // process any command from USB serial (Arduino monitor) xor Bluetooth serial
   
-  if (gpsWaitFix(5)) // wait 5 seconds for fix
+  if (gpsWaitFix(5)) // wait up to 5 seconds for fix, returns true if we have a fix
   {
     Serial.print(F("Fix time "));
     Serial.print(endFixmS - startGetFixmS);
@@ -768,24 +776,25 @@ void loop()
     ina219curr = ina219.shuntCurrent();
     #endif // INA219 
   
-    uptimetostrings();  // get updaysstr and uptimestr
-    
-    // calcavg();          // calculate frequency averages -> call moved inside 2Hz ISR (from logfcount)
-
-    #ifdef GPSDO_BLUETOOTH
-    btGPSDOstats();
-    #endif // BLUETOOTH
+    uptimetostrings();           // get updaysstr and uptimestr
 
     yellow_led_state = 0;        // turn off yellow LED
-    printGPSDOstats();
+
+    #ifdef GPSDO_BLUETOOTH 
+    printGPSDOstats(Serial2);   // print stats to Bluetooth Serial
+    #else                       // xor
+    printGPSDOstats(Serial);    // print stats to USB Serial
+    #endif // BLUETOOTH
+
     displayscreen1();
+    
     startGetFixmS = millis();    // have a fix, next thing that happens is checking for a fix, so restart timer
   }
   else // no GPS fix could be acquired for the last five seconds
   {
     yellow_led_state = 2;        // blink yellow LED
     
-    disp.clear();
+    disp.clear();                // display no fix message on OLED
     disp.setCursor(0, 0);
     disp.print(F(Program_Name));
     disp.print(F(" - "));
@@ -795,16 +804,16 @@ void loop()
     disp.print( (millis() - startGetFixmS) / 1000 );
     disp.print(F("s"));
     
+    #ifdef GPSDO_BLUETOOTH      // print no fix message to either
+    Serial2.println();          // Bluetooth serial or USB serial
+    Serial2.print(F("Waiting for GPS Fix "));
+    Serial2.print( (millis() - startGetFixmS) / 1000 );
+    Serial2.println(F("s"));
+    #else
     Serial.println();
     Serial.print(F("Waiting for GPS Fix "));
     Serial.print( (millis() - startGetFixmS) / 1000 );
     Serial.println(F("s"));
-
-    #ifdef GPSDO_BLUETOOTH
-    Serial2.println();
-    Serial2.print(F("Waiting for GPS Fix "));
-    Serial2.print( (millis() - startGetFixmS) / 1000 );
-    Serial2.println(F("s"));
     #endif // BLUETOOTH
 
     // no fix, raise flush_ring_buffers_flag
@@ -884,281 +893,155 @@ bool gpsWaitFix(uint16_t waitSecs)
 }
 
 
-void printGPSDOstats() 
+void printGPSDOstats(Stream &Serialx) 
 {
   float tempfloat;
   
-  Serial.print(F("Uptime: "));
-  Serial.print(updaysstr);
-  Serial.print(F(" "));
-  Serial.println(uptimestr);
+  Serialx.print(F("Uptime: "));
+  Serialx.print(updaysstr);
+  Serialx.print(F(" "));
+  Serialx.println(uptimestr);
   
-  Serial.println(F("New GPS Fix: "));
+  Serialx.println(F("New GPS Fix: "));
 
   tempfloat = ( (float) GPSHdop / 100);
 
-  Serial.print(F("Lat: "));
-  Serial.print(GPSLat, 6);
-  Serial.print(F(" Lon: "));
-  Serial.print(GPSLon, 6);
-  Serial.print(F(" Alt: "));
-  Serial.print(GPSAlt, 1);
-  Serial.print(F("m Sats: "));
-  Serial.print(GPSSats);
-  Serial.print(F(" HDOP: "));
-  Serial.println(tempfloat, 2);
-  Serial.print(F("UTC Time: "));
+  Serialx.print(F("Lat: "));
+  Serialx.print(GPSLat, 6);
+  Serialx.print(F(" Lon: "));
+  Serialx.print(GPSLon, 6);
+  Serialx.print(F(" Alt: "));
+  Serialx.print(GPSAlt, 1);
+  Serialx.print(F("m Sats: "));
+  Serialx.print(GPSSats);
+  Serialx.print(F(" HDOP: "));
+  Serialx.println(tempfloat, 2);
+  Serialx.print(F("UTC Time: "));
 
   if (hours < 10)
   {
-    Serial.print(F("0"));
+    Serialx.print(F("0"));
   }
 
-  Serial.print(hours);
-  Serial.print(F(":"));
+  Serialx.print(hours);
+  Serialx.print(F(":"));
 
   if (mins < 10)
   {
-    Serial.print(F("0"));
+    Serialx.print(F("0"));
   }
 
-  Serial.print(mins);
-  Serial.print(F(":"));
+  Serialx.print(mins);
+  Serialx.print(F(":"));
 
   if (secs < 10)
   {
-    Serial.print(F("0"));
+    Serialx.print(F("0"));
   }
 
-  Serial.print(secs);
-  Serial.print(F(" Date: "));
+  Serialx.print(secs);
+  Serialx.print(F(" Date: "));
 
-  Serial.print(day);
-  Serial.print(F("/"));
-  Serial.print(month);
-  Serial.print(F("/"));
-  Serial.println(year);
+  Serialx.print(day);
+  Serialx.print(F("/"));
+  Serialx.print(month);
+  Serialx.print(F("/"));
+  Serialx.println(year);
 
-  Serial.println();
+  Serialx.println();
   float Vctl = (float(adcVctl)/4096) * 3.3;
-  Serial.print("Vctl: ");
-  Serial.print(Vctl);
-  Serial.print("  DAC: ");
-  Serial.println(adjusted_DAC_output);
+  Serialx.print("Vctl: ");
+  Serialx.print(Vctl);
+  Serialx.print("  DAC: ");
+  Serialx.println(adjusted_DAC_output);
 
   float Vctlp = (float(pwmVctl)/4096) * 3.3;
-  Serial.print("VctlPWM: ");
-  Serial.print(Vctlp);
-  Serial.print("  PWM: ");
-  Serial.println(adjusted_PWM_output);
+  Serialx.print("VctlPWM: ");
+  Serialx.print(Vctlp);
+  Serialx.print("  PWM: ");
+  Serialx.println(adjusted_PWM_output);
 
   #ifdef GPSDO_VCC
   // Vcc/2 is provided on pin PA0
   float Vcc = (float(adcVcc)/4096) * 3.3 * 2.0;
-  Serial.print("Vcc: ");
-  Serial.println(Vcc);
+  Serialx.print("Vcc: ");
+  Serialx.println(Vcc);
   #endif // VCC
 
   #ifdef GPSDO_VDD
   // internal sensor Vref
   float Vdd = (1.21 * 4096) / float(adcVdd); // from STM32F411CEU6 datasheet
-  Serial.print("Vdd: ");                     // Vdd = Vref on Black Pill
-  Serial.println(Vdd);
+  Serialx.print("Vdd: ");                     // Vdd = Vref on Black Pill
+  Serialx.println(Vdd);
   #endif // VDD
 
   #ifdef GPSDO_INA219
   // current sensor for the OCXO
-  Serial.print(F("OCXO voltage: "));
-  Serial.print(ina219volt, 2);
-  Serial.println(F("V"));
-  Serial.print(F("OCXO current: "));
-  Serial.print(ina219curr, 0);
-  Serial.println(F("mA"));
+  Serialx.print(F("OCXO voltage: "));
+  Serialx.print(ina219volt, 2);
+  Serialx.println(F("V"));
+  Serialx.print(F("OCXO current: "));
+  Serialx.print(ina219curr, 0);
+  Serialx.println(F("mA"));
   #endif // INA219 
       
   // OCXO frequency measurements
-  Serial.println();
-  Serial.println(F("Using 64-bit counter implemented in software"));
-  if (overflowErrorFlag) Serial.println(F("ERROR: overflow "));
-  Serial.print(F("Most Significant 32-bit Count (OverflowCounter): "));
-  Serial.println(tim2overflowcounter);
-  Serial.print(F("Least Significant 32-bit Count (TIM2->CCR3): "));
-  Serial.println(lsfcount);
-  Serial.print(F("64-bit Count: "));
-  Serial.print(fcount64);
-  Serial.print(F(" Frequency: "));
-  Serial.print(calcfreq64);
-  Serial.print(F(" Hz"));
-  Serial.println();
-  Serial.print("10s Frequency Avg: ");
-  Serial.print(avgften,1);
-  Serial.print(F(" Hz"));
-  Serial.println();
-  Serial.print("100s Frequency Avg: ");
-  Serial.print(avgfhun,2);
-  Serial.print(F(" Hz"));
-  Serial.println();
-  Serial.print("1,000s Frequency Avg: ");
-  Serial.print(avgftho,3);
-  Serial.print(F(" Hz"));
-  Serial.println();
-  Serial.print("10,000s Frequency Avg: ");
-  Serial.print(avgftth,4);
-  Serial.print(F(" Hz"));  
-  Serial.println(); 
+  Serialx.println();
+  Serialx.println(F("Using 64-bit counter implemented in software"));
+  if (overflowErrorFlag) Serialx.println(F("ERROR: overflow "));
+  Serialx.print(F("Most Significant 32-bit Count (OverflowCounter): "));
+  Serialx.println(tim2overflowcounter);
+  Serialx.print(F("Least Significant 32-bit Count (TIM2->CCR3): "));
+  Serialx.println(lsfcount);
+  Serialx.print(F("64-bit Count: "));
+  Serialx.print(fcount64);
+  Serialx.print(F(" Frequency: "));
+  Serialx.print(calcfreq64);
+  Serialx.print(F(" Hz"));
+  Serialx.println();
+  Serialx.print("10s Frequency Avg: ");
+  Serialx.print(avgften,1);
+  Serialx.print(F(" Hz"));
+  Serialx.println();
+  Serialx.print("100s Frequency Avg: ");
+  Serialx.print(avgfhun,2);
+  Serialx.print(F(" Hz"));
+  Serialx.println();
+  Serialx.print("1,000s Frequency Avg: ");
+  Serialx.print(avgftho,3);
+  Serialx.print(F(" Hz"));
+  Serialx.println();
+  Serialx.print("10,000s Frequency Avg: ");
+  Serialx.print(avgftth,4);
+  Serialx.print(F(" Hz"));  
+  Serialx.println(); 
 
   #ifdef GPSDO_BMP280_SPI
   // BMP280 measurements
-  Serial.print(F("BMP280 Temperature = "));
-  Serial.print(bmp280temp, 1);
-  Serial.println(" *C");
-  Serial.print(F("Pressure = "));
-  Serial.print((bmp280pres+PressureOffset)/100, 1);
-  Serial.println(" hPa");
-  Serial.print(F("Approx altitude = "));
-  Serial.print(bmp280alti, 1); /* Adjusted to local forecast! */
-  Serial.println(" m");
+  Serialx.print(F("BMP280 Temperature = "));
+  Serialx.print(bmp280temp, 1);
+  Serialx.println(" *C");
+  Serialx.print(F("Pressure = "));
+  Serialx.print((bmp280pres+PressureOffset)/100, 1);
+  Serialx.println(" hPa");
+  Serialx.print(F("Approx altitude = "));
+  Serialx.print(bmp280alti, 1); /* Adjusted to local forecast! */
+  Serialx.println(" m");
   #endif // BMP280_SPI
 
   #ifdef GPSDO_AHT10
   // AHT10 measurements
   sensors_event_t humidity, temp;
   aht.getEvent(&humidity, &temp);// populate temp and humidity objects with fresh data
-  Serial.print("AHT10 Temperature: ");
-  Serial.print(temp.temperature);
-  Serial.println(" *C");
-  Serial.print("Humidity: ");
-  Serial.print(humidity.relative_humidity);
-  Serial.println("% rH");
+  Serialx.print("AHT10 Temperature: ");
+  Serialx.print(temp.temperature);
+  Serialx.println(" *C");
+  Serialx.print("Humidity: ");
+  Serialx.print(humidity.relative_humidity);
+  Serialx.println("% rH");
   #endif // AHT10
   
-  Serial.println();
-  Serial.println();
-}
-
-void btGPSDOstats() 
-{
-  float tempfloat;
-  
-  Serial2.print(F("Uptime "));
-  Serial2.print(updaysstr);
-  Serial2.print(F(" "));
-  Serial2.println(uptimestr);
-
-  Serial2.print(F("New GPS Fix "));
-
-  tempfloat = ( (float) GPSHdop / 100);
-
-  Serial2.print(F("Lat,"));
-  Serial2.print(GPSLat, 6);
-  Serial2.print(F(",Lon,"));
-  Serial2.print(GPSLon, 6);
-  Serial2.print(F(",Alt,"));
-  Serial2.print(GPSAlt, 1);
-  Serial2.print(F("m,Sats,"));
-  Serial2.print(GPSSats);
-  Serial2.print(F(",HDOP,"));
-  Serial2.print(tempfloat, 2);
-  Serial2.print(F(",Time,"));
-
-  if (hours < 10)
-  {
-    Serial2.print(F("0"));
-  }
-
-  Serial2.print(hours);
-  Serial2.print(F(":"));
-
-  if (mins < 10)
-  {
-    Serial2.print(F("0"));
-  }
-
-  Serial2.print(mins);
-  Serial2.print(F(":"));
-
-  if (secs < 10)
-  {
-    Serial2.print(F("0"));
-  }
-
-  Serial2.print(secs);
-  Serial2.print(F(",Date,"));
-
-  Serial2.print(day);
-  Serial2.print(F("/"));
-  Serial2.print(month);
-  Serial2.print(F("/"));
-  Serial2.println(year);
-
-  Serial2.println();
-  float Vctl = (float(adcVctl)/4096) * 3.3;
-  Serial2.print("Vctl: ");
-  Serial2.print(Vctl);
-  Serial2.print("  DAC: ");
-  Serial2.println(adjusted_DAC_output);
-
-  #ifdef GPSDO_VCC
-  // Vcc/2 is provided on pin PA0
-  float Vcc = (float(adcVcc)/4096) * 3.3 * 2.0;
-  Serial2.print("Vcc: ");
-  Serial2.println(Vcc);
-  #endif // VCC
-
-  #ifdef GPSDO_VDD
-  // internal sensor Vref
-  float Vdd = (1.21 * 4096) / float(adcVdd); // from STM32F411CEU6 datasheet
-  Serial2.print("Vdd: ");                     // Vdd = Vref on Black Pill
-  Serial2.println(Vdd);
-  #endif // VDD
-  
-  // OCXO frequency measurements
-  Serial2.println();
-  Serial2.println(F("Using 64-bit counter implemented in software"));
-  Serial2.print(F("Most Significant 32-bit Count (OverflowCounter): "));
-  Serial2.println(tim2overflowcounter);
-  Serial2.print(F("Least Significant 32-bit Count (TIM2->CCR3): "));
-  Serial2.print(fcount64);
-  Serial2.print(F(" Frequency: "));
-  Serial2.print(calcfreq64);
-  Serial2.print(F(" Hz"));
-  Serial2.println();
-  Serial2.print("10s Frequency Avg: ");
-  Serial2.print(avgften,1);
-  Serial2.print(F(" Hz"));
-  Serial2.println();
-  Serial2.print("100s Frequency Avg: ");
-  Serial2.print(avgfhun,2);
-  Serial2.print(F(" Hz"));
-  Serial2.println(); 
-
-  #ifdef GPSDO_BMP280_SPI
-  // BMP280 measurements
-  Serial2.print(F("BMP280 Temperature = "));
-  Serial2.print(bmp280temp, 1);
-  Serial2.println(" *C");
-  Serial2.print(F("Pressure = "));
-  Serial2.print((bmp280pres+PressureOffset)/100, 1);
-  Serial2.println(" hPa");
-  Serial2.print(F("Approx altitude = "));
-  Serial2.print(bmp280alti, 1); /* Adjusted to local forecast! */
-  Serial2.println(" m");
-  #endif // BMP280_SPI
-
-  #ifdef GPSDO_AHT10
-  // AHT10 measurements
-  sensors_event_t humidity, temp;
-  aht.getEvent(&humidity, &temp);// populate temp and humidity objects with fresh data
-  Serial2.print("AHT10 Temperature: ");
-  Serial2.print(temp.temperature);
-  Serial2.println(" *C");
-  Serial2.print("Humidity: ");
-  Serial2.print(humidity.relative_humidity);
-  Serial2.println("% rH");
-  #endif // AHT10
-  
-  Serial2.println();
-  Serial2.println();
+  Serialx.println();
 }
 
 void displayscreen1()
