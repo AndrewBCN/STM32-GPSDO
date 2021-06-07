@@ -1,0 +1,34 @@
+A quick discussion of noise, DAC resolution and OCXO frequency control
+======================================================================
+
+The STM32 GPSDO can use either an inexpensive 12-bit I2C DAC (MCP4725) module, or a couple of rc filters on one of the PWM pins of the STM32 MCU, to generate Vctl - the voltage used to control the frequency of the OCXO over a narrow range of 10MHz +/- a few Hz. The exact OCXO frequency provided by varying Vctl over a 0V - 4.4V range depends on the OCXO used as well as a number of different factors, but roughly speaking the precision of the OCXO frequency relative to a precise 10MHz is directly proportional to the precision with which we can set Vctl.
+
+That's for the theory. In practice, we have to contend with a ton of noise, specially on a circuit implemented on a breadboard and with voltage supplies coming from a laptop USB port or a cheap power brick.
+So from experience, I have determined that a 12-bit DAC used to control Vctl was good enough to control the OCXO frequency down to +/- 0.01Hz or 10E-9 or 1ppb which was my initial precision target for the STM32 GPSDO.
+
+Back to the theory, the GPS receiver when locked with a good fix provides a 1PPS with a maximum jitter of roughly 100ns - which also happens to be the period of our 10MHz OCXO. So a single OCXO frequency measurement sample timed by the 1PPS pulse from the GPS receiver has a maximum error of exactly 1Hz (again theoretically speaking). However the error from the 1PPS jitter "cancels out" over sequential measurements, so the maximum error over 10 sequential measurements (10 seconds) is 0.1Hz, over 100 sequential measurements (100 seconds) is 0.01Hz, etc.
+
+So in theory if we measure the OCXO frequency based on the 1PPS pulse over 1000 seconds (1000 sequential measurements), the maximum measurement error should be < 0.001Hz, or 10E-10 or 0.1ppb. That's exactly an order of magnitude better than what our 12-bit DAC is capable of.
+
+Using a 16-bit DAC provided by a PWM signal
+===========================================
+
+The above reasoning led me to test a 16-bit DAC built by connecting a pair of rc filters to the PWM output of the STM32 MCU. Because the STM32 timers are 16-bit timers, we can with four lines of C obtain a 2kHz 16-bit PWM signal from the MCU, which is converted to a DC value (plus a ton of noise) and hence provides us with a 16-bit DAC, which we can use to control the OCXO Vctl. That's 16x more resolution than our 12-bit DAC can provide, at least in theory.
+
+So, in practice do we get an OCXO frequency control with a precision of 0.001Hz to match our 1000s maximum measurement error with such a setup?
+
+The anecdotal data I have collected so far seems to indicate that yes, we do. The STM32 GPSDO when calibrated and with an uptime of 10 hours or more often reports a stable frequency of 10000000.000Hz +/- 0.001Hz.
+
+Of course I would need an even better clock to confirm to which degree these readings are correct, and I don't have access to such expensive equipment right now.
+
+Can we do even better?
+======================
+
+The question here is whether we could use a measurement period of 10,000 seconds and target a precision of 10E-11 or 0.01ppb for our STM32 GPSDO breadboard prototype, by either "dithering" the 16-bit PWM signal or mixing two 16-bit PWM signals with different amplitudes to increase the resolution of our software-based DAC by another 4 bits or so.
+
+To me, that's a moot point, for various reasons.
+
+As already mentioned, my initial precision target for the STM32 GPSDO project was 10E-9 (1ppb) and that was achieved with the 12-bit DAC. An order of magnitude better precision (10E-10) was also achieved apparently, by using a software based 16-bit DAC and 1000s measurement periods.
+
+For a DIY home project following the time-proven K.I.S.S. principle, costing less than $40 and assembled on a breadboard, these are more than good enough results.
+
