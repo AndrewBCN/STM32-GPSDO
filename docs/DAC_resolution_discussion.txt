@@ -17,7 +17,7 @@ The above reasoning led me to test a 16-bit DAC built by connecting a pair of rc
 
 So, in practice do we get an OCXO frequency control with a precision of 0.001Hz to match our 1000s maximum measurement error with such a setup?
 
-The anecdotal data I have collected so far seems to indicate that yes, we do. The STM32 GPSDO when calibrated and with an uptime of 10 hours or more often reports a stable frequency of 10000000.000Hz +/- 0.001Hz.
+The anecdotal data I have collected so far seems to indicate that yes, we do. The STM32 GPSDO when calibrated and with an uptime of 10 hours or more often reports a stable frequency of 10000000.000Hz +/- 0.001Hz (see below).
 
 Of course I would need an even better clock to confirm to which degree these readings are correct, and I don't have access to such expensive equipment right now.
 
@@ -31,4 +31,47 @@ To me, that's a moot point, for various reasons.
 As already mentioned, my initial precision target for the STM32 GPSDO project was 10E-9 (1ppb) and that was achieved with the 12-bit DAC. An order of magnitude better precision (10E-10) was also achieved apparently, by using a software based 16-bit DAC and 1000s measurement periods.
 
 For a DIY home project following the time-proven K.I.S.S. principle, costing less than $40 and assembled on a breadboard, these are more than good enough results.
+
+An anecdotal data point
+=======================
+
+This is what the STM32 GPSDO reports either on USB serial or Bluetooth serial (but not both), once per second:
+
+Wait for GPS fix max. 1 second
+
+$GNGSA,A,3,31,25,12,18,02,29,20,,,,,,2.23,1.37,1.76*1E
+$GNGSA1,,86,49,215,*6B
+$GNGLL,4833.64512,N,00746.91322,E,092423.00,A,A*7F
+$GNRMC,092424.00,A,4833.64512,N,00746.91323,E,0.040,,070621,,,A*66
+$GNGGA,092424.00,4833.64512,N,00746.91323,E,1,06,1.88,147.8,M,47.3,M,,*41
+
+
+Fix time 884mS
+Uptime: 000d 12:41:36
+New GPS Fix: 
+Lat: 48.560753 Lon: 7.781887 Alt: 147.8m
+Sats: 6 HDOP: 1.88
+UTC Time: 09:24:24 Date: 7/6/2021
+
+Voltages: 
+Vctl: 1.97  DAC: 2402
+VctlPWM: 1.78  PWM: 35546
+Vcc: 5.06
+Vdd: 3.29
+
+Frequency measurements using 64-bit counter:
+64-bit Counter: 435387151170
+Frequency: 9999999 Hz
+10s Frequency Avg: 9999999.9 Hz
+100s Frequency Avg: 9999999.99 Hz
+1,000s Frequency Avg: 9999999.999 Hz
+10,000s Frequency Avg: 0.0000 Hz
+
+BMP280 Temperature = 25.3 *C
+Pressure = 1021.0 hPa
+Approx altitude = 48.9 m
+AHT10 Temperature: 22.15 *C
+Humidity: 77.75% rH
+
+
 
