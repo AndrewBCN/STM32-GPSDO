@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  STM32 GPSDO v0.04g by André Balsa, June 2021
+  STM32 GPSDO v0.04h by André Balsa, June 2021
   GPLV3 license
   Reuses small bits of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
   From version 0.03 includes a command parser, so the GPSDO can receive commands from the USB serial or
@@ -117,7 +117,7 @@
 // 2. Refactor the setup and main loop functions to make them as simple as possible.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.04g"
+#define Program_Version "v0.04h"
 #define Author_Name "André Balsa"
 
 // Define hardware options
@@ -1662,8 +1662,12 @@ void displayscreen1()
   disp.print(F("V"));
   #endif // VDD
 
-  disp.setCursor(11, 7); // display DAC value
-  disp.print(adjusted_DAC_output);  
+  disp.setCursor(11, 7); // display PWM/DAC value
+  #ifdef GPSDO_PWM_DAC
+  disp.print(adjusted_PWM_output);
+  #else
+  disp.print(adjusted_DAC_output);
+  #endif // PWM_DAC
 }
 #endif // OLED
 
