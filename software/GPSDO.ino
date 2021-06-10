@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  STM32 GPSDO v0.04f by André Balsa, June 2021
+  STM32 GPSDO v0.04g by André Balsa, June 2021
   GPLV3 license
   Reuses small bits of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
   From version 0.03 includes a command parser, so the GPSDO can receive commands from the USB serial or
@@ -117,13 +117,14 @@
 // 2. Refactor the setup and main loop functions to make them as simple as possible.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.04f"
+#define Program_Version "v0.04g"
 #define Author_Name "André Balsa"
 
 // Define hardware options
 // -----------------------
 #define GPSDO_OLED            // SSD1306 128x64 I2C OLED display
 #define GPSDO_MCP4725         // MCP4725 I2C 12-bit DAC
+#define GPSDO_PWM_DAC         // STM32 16-bit PWM DAC, requires two rc filters (2xr=20k, 2xc=10uF)
 #define GPSDO_AHT10           // I2C temperature and humidity sensor
 #define GPSDO_GEN_2kHz        // generate 2kHz square wave test signal on pin PB9 using Timer 4
 #define GPSDO_BMP280_SPI      // SPI atmospheric pressure, temperature and altitude sensor
@@ -979,7 +980,16 @@ void loop()
     year = gps.date.year();
 
 
-    if (must_adjust_DAC && cbHun_full) adjustVctlDAC();   // in principle just once every 429 seconds, and if we have valid data
+    if (must_adjust_DAC && cbHun_full) // in principle just once every 429 seconds, and only if we have valid data
+    {
+      // use different algorithms for 12-bit I2C DAC and STM32 16-bit PWM DAC
+      #ifdef GPSDO_MCP4725
+      adjustVctlDAC();  
+      #endif // MCP4725
+      #ifdef GPSDO_PWM_DAC
+      adjustVctlPWM();
+      #endif // PWM_DAC
+    }
 
     dacVctl = analogRead(VctlInputPin);         // read the Vctl voltage output by the DAC
     avgdacVctl = avg_dacVctl.reading(dacVctl);  // average it
@@ -1156,11 +1166,70 @@ void docalibration()
   Serial.print(F("Calibrating..."));
   Serial.println();
   #endif // BLUETOOTH
-  
-  // ... (do lots of things here to calibrate the GPSDO)
-  
+
+  #ifdef GPSDO_OLED
+  disp.clear();                // display calibrating message on OLED
+  disp.setCursor(0, 0);
+  disp.print(F(Program_Name));
+  disp.print(F(" - "));
+  disp.print(F(Program_Version));
+  disp.setCursor(0, 2);
+  disp.print(F("Calibrating..."));
+  disp.setCursor(0, 3);
+  disp.print(F("Please wait"));
+  #endif // OLED
+
+  /*  The calibration algorithm
+   *  The objective of the calibration is to find the approximate Vctl to obtain
+   *  10MHz +/- 0.1Hz.
+   *  
+   *  we can use either a PID algorithm or a simple linear interpolation algorithm
+   *  
+   *  The following describes a simple linear interpolation algorithm
+   *  
+   *  We first output 1.5V for the DAC or PWM, wait 30 seconds and note the 10s frequency average.
+   *  Next we output 2.5V for the DAC or PWM, wait 30 seconds and note the 10s frequency average.
+   *  Now we calculate the Vctl for 10MHz +/- 0.1Hz using linear interpolation between the two points.
+   */
+  // for 12-bit DAC
+  // 1.5V for DAC = 4096 x (1.5 / 3.3) = 1862 results in frequency f1 = 10MHz + e1
+  // 2.5V for DAC = 4096 x (2.5 / 3.3) = 3103 results in frequency f2 = 10MHz + e2
+  // for 16-bit PWM
+  // 1.5V for PWM = 65536 x (1.5 / 3.2) = 30720 results in frequency f1 = 10MHz + e1
+  // 2.5V for PWM = 65536 x (2.5 / 3.2) = 51200 results in frequency f2 = 10MHz + e2
+  // where f2 > f1 (most OCXOs have positive slope).
+  double f1, f2, e1, e2;
+  // make sure we have a fix and data
+  while (!cbTen_full) delay(1000);
+  // measure frequency for Vctl=1.5V
+  Serial.println(F("set PWM 1.5V, wait 15s"));
+  analogWrite(VctlPWMOutputPin, 30720);
+  delay(15000);
+  Serial.print(F("f1 (average frequency for 1.5V Vctl): "));
+  f1 = avgften;
+  Serial.print(f1,1);
+  Serial.println(F(" Hz"));
+  // make sure we have a fix and data again
+  while (!cbTen_full) delay(1000);
+  // measure frequency for Vctl=2.5V
+  Serial.println(F("set PWM 2.5V, wait 15s"));
+  analogWrite(VctlPWMOutputPin, 51200);
+  delay(15000);
+  Serial.print(F("f2 (average frequency for 2.5V Vctl): "));
+  f2 = avgften;
+  Serial.print(f2,1);
+  Serial.println(F(" Hz"));
+  // slope s is (f2-f1) / (51200-30720) for PWM
+  // So F=10MHz +/- 0.1Hz for PWM = 30720 - (e1 / s)
+  // set Vctl
+  // adjusted_PWM_output = formula
+  adjusted_PWM_output = 30720 - ((f1 - 10000000.0) / ((f2 - f1) / 20480));
+  Serial.print(F("Calculated PWM: "));
+  Serial.println(adjusted_PWM_output);
+  analogWrite(VctlPWMOutputPin, adjusted_PWM_output); 
   // calibration done
-  #ifdef GPSDO_BLUETOOTH      // print calibrating started message to either
+  
+  #ifdef GPSDO_BLUETOOTH      // print calibration finished message to either
   Serial2.println();          // Bluetooth serial xor USB serial
   Serial2.print(F("Calibration done."));
   Serial2.println();
@@ -1173,37 +1242,93 @@ void docalibration()
   force_calibration_flag = false; // reset flag, calibration done
 }
 
-void adjustVctlDAC() // slightly more advanced algorithm than previous version
+void adjustVctlDAC()
 // This should reach a stable DAC output value / a stable 10000000.00 frequency
-// 10x faster than before
+// after an hour or so
 {
+  // decrease frequency
   if (avgfhun >= 10000000.01) {
     if (avgfhun >= 10000000.10) {
-     // decrease DAC by ten bits
+      // decrease DAC by ten bits = coarse
       adjusted_DAC_output = adjusted_DAC_output - 10;
+    } else {
+      // decrease DAC by one bit = fine
+      adjusted_DAC_output--;
+    }
+    dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
+  } 
+  // or increase frequency
+  else if (avgfhun <= 9999999.99) {
+    if (avgfhun <= 9999999.90) {
+      // increase DAC by ten bits = coarse
+      adjusted_DAC_output = adjusted_DAC_output + 10;      
+    } else {
+      // increase DAC by one bit = fine
+      adjusted_DAC_output++;
+    }
+    dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
+  }
+  // or do nothing because avgfrequency over last 100s is 10000000.00Hz
+  must_adjust_DAC = false; // clear flag and we are done
+}
+
+void adjustVctlPWM()
+// This should reach a stable DAC output value / a stable 10000000.00 frequency
+// after an hour or so, and 10000000.000 after eight hours or so
+{
+  // decrease frequency
+  if (avgfhun >= 10000000.01) {
+    if (avgfhun >= 10000000.10) {
+      // decrease PWM by 100 bits = coarse
       adjusted_PWM_output = adjusted_PWM_output - 100;
     } else {
-      // decrease DAC by one bit
-      adjusted_DAC_output--;
-      adjusted_PWM_output = adjusted_PWM_output - 4;
+      // decrease PWM by ten bits = fine
+      adjusted_PWM_output = adjusted_PWM_output - 10;
     }
-    dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
     analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
-    must_adjust_DAC = false; // clear flag
-  } else if (avgfhun <= 9999999.99) {
+  } 
+  // or increase frequency
+  else if (avgfhun <= 9999999.99) {
     if (avgfhun <= 9999999.90) {
-     // increase DAC by ten bits
-      adjusted_DAC_output = adjusted_DAC_output + 10;
+     // increase PWM by 100 bits = coarse
       adjusted_PWM_output = adjusted_PWM_output + 100;      
     } else {
-    // increase DAC by one bit
-    adjusted_DAC_output++;
-    adjusted_PWM_output = adjusted_PWM_output + 4;
+    // increase PWM by ten bits = fine
+    adjusted_PWM_output = adjusted_PWM_output + 10;
     }
-    dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096
     analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
-    must_adjust_DAC = false; // clear flag
   }
+  // or proceed to ultrafine because avgfrequency over last 100s is 10000000.00Hz
+
+  // check first if we have the data, then do ultrafine frequency adjustment
+  // ultimately the objective is 10000000.000 over the last 1000s (16min40s)
+  if ((cbTho_full) && (avgftho >= 9999999.990) && (avgftho <= 10000000.010)) {
+    
+    // decrease frequency
+    if (avgftho >= 10000000.001) {
+      if (avgftho >= 10000000.005) {
+        // decrease PWM by 5 bits = very fine
+        adjusted_PWM_output = adjusted_PWM_output - 5;
+      } else {
+        // decrease PWM by one bit = ultrafine
+        adjusted_PWM_output = adjusted_PWM_output - 1;
+      }
+      analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
+    } 
+    // or increase frequency
+    else if (avgftho <= 9999999.999) {
+      if (avgftho <= 9999999.995) {
+       // increase PWM by 5 bits = very fine
+        adjusted_PWM_output = adjusted_PWM_output + 5;      
+      } else {
+      // increase PWM by one bit = ultrafine
+      adjusted_PWM_output = adjusted_PWM_output + 1;
+      }
+      analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
+    }
+  }
+  // or do nothing because avgfrequency over last 1000s is 10000000.000Hz
+  must_adjust_DAC = false; // clear flag and we are done
 }
 
 
@@ -1227,7 +1352,7 @@ bool gpsWaitFix(uint16_t waitSecs)
   //if (waitSecs > 1) Serial.println(F(" seconds")); else Serial.println(F(" second"));
   #endif // Bluetooth
 
-  endwaitmS = millis() + (waitSecs * 950);
+  endwaitmS = millis() + (waitSecs * 1000);
 
   while (millis() < endwaitmS)
   {
