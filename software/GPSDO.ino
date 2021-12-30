@@ -187,6 +187,7 @@ Adafruit_AHTX0 aht;                                // create object aht
 #include <LapINA219.h>                             // LapINA219 library library
 LapINA219 ina219(0x40);                            // create object ina219 with I2C address 0x40
 float ina219volt=0.0, ina219curr=0.0;
+TwoWire Wire3(PB4,PA8);                            // Second TwoWire instance for INA219 on SDA3/SCL3 (should be put somewhere more fitting but must stay global)
 #endif // INA219
 
 #ifdef GPSDO_OLED
@@ -732,7 +733,7 @@ void setup()
   #endif // OLED 
   
   #ifdef GPSDO_INA219
-  ina219.begin();                           // calibrates ina219 sensor
+  ina219.begin(&Wire3);                           // calibrates ina219 sensor Edit: start the sensor on the third I2C controller
   Wire.setClock(400000L); 
   #endif // INA219 
 
