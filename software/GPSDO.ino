@@ -122,8 +122,10 @@
 
 // Define hardware options
 // -----------------------
-#define GPSDO_OLED            // SSD1306 128x64 I2C OLED display
+#define GPSDO_OLED_SSD1306    // SSD1306 128x64 I2C OLED display
+// #define GPSDO_OLED_SH1106     // SH1106 128x64 I2C OLED display
 #define GPSDO_MCP4725         // MCP4725 I2C 12-bit DAC
+// #define GPSDO_MCP4725_Adafruit// MCP4725 I2C 12-bit DAC, Adafruit board with address scheme 0x62/0x63
 #define GPSDO_PWM_DAC         // STM32 16-bit PWM DAC, requires two rc filters (2xr=20k, 2xc=10uF)
 #define GPSDO_AHT10           // I2C temperature and humidity sensor
 #define GPSDO_GEN_2kHz        // generate 2kHz square wave test signal on pin PB9 using Timer 4
@@ -190,12 +192,17 @@ float ina219volt=0.0, ina219curr=0.0;
 TwoWire Wire3(PB4,PA8);                            // Second TwoWire instance for INA219 on SDA3/SCL3 (should be put somewhere more fitting but must stay global)
 #endif // INA219
 
-#ifdef GPSDO_OLED
+#ifdef GPSDO_OLED_SSD1306
 #include <U8x8lib.h>                                      // get library here >  https://github.com/olikraus/u8g2 
 U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for standard 0.96" SSD1306
 #endif // OLED
 
-#ifdef GPSDO_MCP4725
+#ifdef GPSDO_OLED_SH1106
+#include <U8x8lib.h>                                      // get library here >  https://github.com/olikraus/u8g2 
+U8X8_SH1106_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);     // for SH1106 which would otherwise display with an X-axis offset
+#endif // OLED
+
+#if defined GPSDO_MCP4725 || defined GPSDO_MCP4725_Adafruit
 #include <Adafruit_MCP4725.h>             // MCP4725 12-bit DAC Adafruit library
 Adafruit_MCP4725 dac;
 const uint16_t default_DAC_output = 2400; // 12-bit value, varies from OCXO to OCXO, and with aging and temperature
@@ -719,7 +726,7 @@ void setup()
   // try setting a higher I2C clock speed
   Wire.setClock(400000L); 
   
-  #ifdef GPSDO_OLED
+  #if defined GPSDO_OLED_SSD1306 || defined GPSDO_OLED_SH1106
   // Setup OLED I2C display
   // Note that u8x8 library initializes I2C hardware interface
   disp.setBusClock(400000L); // try to avoid display locking up
@@ -739,7 +746,12 @@ void setup()
 
   // Setup I2C DAC, read voltage on PB0
   adjusted_DAC_output = default_DAC_output; // initial DAC value
+  #ifdef GPSDO_MCP4725
   dac.begin(0x60);
+  #endif // MCP4725
+  #ifdef GPSDO_MCP4725_Adafruit
+  dac.begin(0x62);                          // Adafruit module uses address 0x62 for A0 unconnected and 0x63 for A0 pulled to VDD
+  #endif // MCP4725 Adafruit version
   // Output Vctl to DAC, but do not write to DAC EEPROM 
   dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096 so 2048 should be 1/2 Vdd = approx. 1.65V
   analogReadResolution(12); // make sure we read 12 bit values when we read from PB0
@@ -984,7 +996,7 @@ void loop()
     if (must_adjust_DAC && cbHun_full) // in principle just once every 429 seconds, and only if we have valid data
     {
       // use different algorithms for 12-bit I2C DAC and STM32 16-bit PWM DAC
-      #ifdef GPSDO_MCP4725
+      #if defined GPSDO_MCP4725 || defined GPSDO_MCP4725_Adafruit
       adjustVctlDAC();  
       #endif // MCP4725
       #ifdef GPSDO_PWM_DAC
@@ -1029,7 +1041,7 @@ void loop()
     printGPSDOstats(Serial);    // print stats to USB Serial
     #endif // BLUETOOTH
 
-    #ifdef GPSDO_OLED
+    #if defined GPSDO_OLED_SSD1306 || defined GPSDO_OLED_SH1106
     displayscreen1();
     #endif // OLED
     
@@ -1039,7 +1051,7 @@ void loop()
   {
     yellow_led_state = 1;        // turn on yellow LED
     
-    #ifdef GPSDO_OLED
+    #if defined GPSDO_OLED_SSD1306 || defined GPSDO_OLED_SH1106
     disp.clear();                // display no fix message on OLED
     disp.setCursor(0, 0);
     disp.print(F(Program_Name));
@@ -1124,7 +1136,7 @@ void docalibration()
     while (countdown) {
           yellow_led_state = 2;        // blink yellow LED
     
-          #ifdef GPSDO_OLED
+          #if defined GPSDO_OLED_SSD1306 || defined GPSDO_OLED_SH1106
           disp.clear();                // display warmup message on OLED
           disp.setCursor(0, 0);
           disp.print(F(Program_Name));
@@ -1168,7 +1180,7 @@ void docalibration()
   Serial.println();
   #endif // BLUETOOTH
 
-  #ifdef GPSDO_OLED
+  #if defined GPSDO_OLED_SSD1306 || defined GPSDO_OLED_SH1106
   disp.clear();                // display calibrating message on OLED
   disp.setCursor(0, 0);
   disp.print(F(Program_Name));
@@ -1240,6 +1252,7 @@ void docalibration()
   Serial.println();
   #endif // BLUETOOTH
   
+  disp.clear();          // additional clear command to get rid of remnants of the calibration message on the main screen 
   force_calibration_flag = false; // reset flag, calibration done
 }
 
@@ -1535,7 +1548,7 @@ void printGPSDOstats(Stream &Serialx)
   Serialx.println();
 }
 
-#ifdef GPSDO_OLED
+#if defined GPSDO_OLED_SSD1306 || defined GPSDO_OLED_SH1106
 void displayscreen1()
 {
   //show GPSDO data on OLED display
