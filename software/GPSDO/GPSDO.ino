@@ -1203,21 +1203,53 @@ void docalibration()
   // make sure we have a fix and data
   while (!cbTen_full) delay(1000);
   // measure frequency for Vctl=1.5V
-  Serial.println(F("set PWM 1.5V, wait 15s"));
+  
+  #ifdef GPSDO_OLED  
+  disp.setCursor(0, 3);
+  disp.clearLine(3);
+  disp.print(F("Vctl: 1.5V / 15s"));
+  #endif // OLED
+  
+  Serial.println(F("Setting PWM to 1.5V, wait 15s"));
   analogWrite(VctlPWMOutputPin, 30720);
   delay(15000);
   Serial.print(F("f1 (average frequency for 1.5V Vctl): "));
   f1 = avgften;
+  
+  #ifdef GPSDO_OLED  
+  disp.setCursor(0, 4);
+  disp.clearLine(4);
+  disp.print(F("F1:"));
+  disp.print(f1,1);
+  disp.print(F(" Hz"));
+  #endif // OLED
+  
   Serial.print(f1,1);
   Serial.println(F(" Hz"));
   // make sure we have a fix and data again
   while (!cbTen_full) delay(1000);
   // measure frequency for Vctl=2.5V
-  Serial.println(F("set PWM 2.5V, wait 15s"));
+  
+  #ifdef GPSDO_OLED  
+  disp.setCursor(0, 5);
+  disp.clearLine(5);
+  disp.print(F("Vctl: 2.5V / 15s"));
+  #endif // OLED
+  
+  Serial.println(F("Setting PWM to 2.5V, wait 15s"));
   analogWrite(VctlPWMOutputPin, 51200);
   delay(15000);
   Serial.print(F("f2 (average frequency for 2.5V Vctl): "));
   f2 = avgften;
+  
+  #ifdef GPSDO_OLED  
+  disp.setCursor(0, 6);
+  disp.clearLine(6);
+  disp.print(F("F2:"));
+  disp.print(f2,1);
+  disp.print(F(" Hz"));
+  #endif // OLED
+  
   Serial.print(f2,1);
   Serial.println(F(" Hz"));
   // slope s is (f2-f1) / (51200-30720) for PWM
@@ -1227,6 +1259,19 @@ void docalibration()
   adjusted_PWM_output = 30720 - ((f1 - 10000000.0) / ((f2 - f1) / 20480));
   Serial.print(F("Calculated PWM: "));
   Serial.println(adjusted_PWM_output);
+
+  #ifdef GPSDO_OLED  
+  disp.setCursor(0, 7);
+  disp.clearLine(7);
+  disp.print(F("PWM: "));
+  disp.print(adjusted_PWM_output,1);
+  delay(3000);                          // Wait for 3 second (so You can read what's written on OLED display
+  disp.clear();
+  disp.print(F(Program_Name));
+  disp.print(F(" - "));
+  disp.print(F(Program_Version));                         
+  #endif // OLED
+
   analogWrite(VctlPWMOutputPin, adjusted_PWM_output); 
   // calibration done
   
