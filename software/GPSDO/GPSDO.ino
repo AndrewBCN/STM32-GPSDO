@@ -1260,11 +1260,15 @@ void docalibration()
   Serial.print(F("Calculated PWM: "));
   Serial.println(adjusted_PWM_output);
 
-  #ifdef GPSDO_OLED  
-  disp.setCursor(0, 7);
+  #ifdef GPSDO_OLED
   disp.clearLine(7);
-  disp.print(F("PWM: "));
+  disp.setCursor(0, 7);
+  disp.print(F("PWM:"));
   disp.print(adjusted_PWM_output,1);
+  disp.print(F(" "));
+  float Vctlp = (float(avgpwmVctl)/4096) * 3.3;
+  disp.print(Vctlp);
+  disp.print(F(" V"));
   delay(3000);                          // Wait for 3 second (so You can read what's written on OLED display
   disp.clear();
   disp.print(F(Program_Name));
