@@ -123,13 +123,13 @@
 // Define hardware options
 // -----------------------
 #define GPSDO_OLED            // SSD1306 128x64 I2C OLED display
-#define GPSDO_MCP4725         // MCP4725 I2C 12-bit DAC
+//#define GPSDO_MCP4725         // MCP4725 I2C 12-bit DAC
 #define GPSDO_PWM_DAC         // STM32 16-bit PWM DAC, requires two rc filters (2xr=20k, 2xc=10uF)
-#define GPSDO_AHT10           // I2C temperature and humidity sensor
+//#define GPSDO_AHT10           // I2C temperature and humidity sensor
 #define GPSDO_GEN_2kHz        // generate 2kHz square wave test signal on pin PB9 using Timer 4
-#define GPSDO_BMP280_SPI      // SPI atmospheric pressure, temperature and altitude sensor
-// #define GPSDO_INA219          // INA219 I2C current and voltage sensor
-// #define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
+//#define GPSDO_BMP280_SPI      // SPI atmospheric pressure, temperature and altitude sensor
+//#define GPSDO_INA219          // INA219 I2C current and Kvoltage sensor
+//#define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
 #define GPSDO_VCC             // Vcc (nominal 5V) ; reading Vcc requires 1:2 voltage divider to PA0
 #define GPSDO_VDD             // Vdd (nominal 3.3V) reads VREF internal ADC channel
 #define GPSDO_CALIBRATION     // auto-calibration is enabled
@@ -366,6 +366,8 @@ void cmd_up10(SerialCommands* sender)
   analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
   sender->GetSerial()->println("increased PWM 10 bits");
 }
+
+#ifdef GPSDO_MCP4725
 // called for ud10 (increase DAC 10 bits) command
 void cmd_ud10(SerialCommands* sender)
 {
@@ -373,19 +375,39 @@ void cmd_ud10(SerialCommands* sender)
   dac.setVoltage(adjusted_DAC_output, false);
   sender->GetSerial()->println("increased DAC 10 bits");
 }
-// called for dp10 (decrease PWM 10 bits) command
-void cmd_dp10(SerialCommands* sender)
-{
-  adjusted_PWM_output = adjusted_PWM_output - 10;
-  analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
-  sender->GetSerial()->println("decreased PWM 10 bits");
-}
+
 // called for dd10 (decrease DAC 10 bits) command
 void cmd_dd10(SerialCommands* sender)
 {
   adjusted_DAC_output = adjusted_DAC_output - 10;
   dac.setVoltage(adjusted_DAC_output, false);
   sender->GetSerial()->println("decreased DAC 10 bits");
+}
+
+// called for ud1 (increase DAC 1 bit) command
+void cmd_ud1(SerialCommands* sender)
+{
+  adjusted_DAC_output = adjusted_DAC_output + 1;
+  dac.setVoltage(adjusted_DAC_output, false);
+  sender->GetSerial()->println("increased DAC 1 bit");
+}
+
+// called for dd1 (decrease DAC 1 bit) command
+void cmd_dd1(SerialCommands* sender)
+{
+  adjusted_DAC_output = adjusted_DAC_output - 1;
+  dac.setVoltage(adjusted_DAC_output, false);
+  sender->GetSerial()->println("decreased DAC 1 bit");
+}
+
+#endif
+
+// called for dp10 (decrease PWM 10 bits) command
+void cmd_dp10(SerialCommands* sender)
+{
+  adjusted_PWM_output = adjusted_PWM_output - 10;
+  analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
+  sender->GetSerial()->println("decreased PWM 10 bits");
 }
 
 // called for up1 (increase PWM 1 bit) command
@@ -395,13 +417,7 @@ void cmd_up1(SerialCommands* sender)
   analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
   sender->GetSerial()->println("increased PWM 1 bit");
 }
-// called for ud1 (increase DAC 1 bit) command
-void cmd_ud1(SerialCommands* sender)
-{
-  adjusted_DAC_output = adjusted_DAC_output + 1;
-  dac.setVoltage(adjusted_DAC_output, false);
-  sender->GetSerial()->println("increased DAC 1 bit");
-}
+
 // called for dp1 (decrease PWM 1 bit) command
 void cmd_dp1(SerialCommands* sender)
 {
@@ -409,29 +425,28 @@ void cmd_dp1(SerialCommands* sender)
   analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
   sender->GetSerial()->println("decreased PWM 1 bit");
 }
-// called for dd1 (decrease DAC 1 bit) command
-void cmd_dd1(SerialCommands* sender)
-{
-  adjusted_DAC_output = adjusted_DAC_output - 1;
-  dac.setVoltage(adjusted_DAC_output, false);
-  sender->GetSerial()->println("decreased DAC 1 bit");
-}
 
 //Note: Commands are case sensitive
 SerialCommand cmd_version_("V", cmd_version);
 SerialCommand cmd_flush_("F", cmd_flush);
 SerialCommand cmd_calibrate_("C", cmd_calibrate);
 SerialCommand cmd_tunnel_("T", cmd_tunnel);
+
 // coarse adjust
 SerialCommand cmd_up10_("up10", cmd_up10);
-SerialCommand cmd_ud10_("ud10", cmd_ud10);
 SerialCommand cmd_dp10_("dp10", cmd_dp10);
+
+#ifdef GPSDO_MCP4725
+SerialCommand cmd_ud10_("ud10", cmd_ud10);
 SerialCommand cmd_dd10_("dd10", cmd_dd10);
+
+SerialCommand cmd_ud1_("ud1", cmd_ud1);
+SerialCommand cmd_dd1_("dd1", cmd_dd1);
+#endif
+
 // fine adjust
 SerialCommand cmd_up1_("up1", cmd_up1);
-SerialCommand cmd_ud1_("ud1", cmd_ud1);
 SerialCommand cmd_dp1_("dp1", cmd_dp1);
-SerialCommand cmd_dd1_("dd1", cmd_dd1);
 
 // loglevel
 uint8_t loglevel = 7;   // see commands comments for log level definitions, default is 7
@@ -679,17 +694,19 @@ void setup()
   serial_commands_.AddCommand(&cmd_flush_);
   serial_commands_.AddCommand(&cmd_calibrate_);
   serial_commands_.AddCommand(&cmd_tunnel_);
-  
-  serial_commands_.AddCommand(&cmd_up10_);
-  serial_commands_.AddCommand(&cmd_ud10_);
-  serial_commands_.AddCommand(&cmd_dp10_);
-  serial_commands_.AddCommand(&cmd_dd10_);  
-  
+
   serial_commands_.AddCommand(&cmd_up1_);
-  serial_commands_.AddCommand(&cmd_ud1_);
   serial_commands_.AddCommand(&cmd_dp1_);
-  serial_commands_.AddCommand(&cmd_dd1_);
- 
+  serial_commands_.AddCommand(&cmd_up10_);
+  serial_commands_.AddCommand(&cmd_dp10_);
+
+  #ifdef GPSDO_MCP4725  
+    serial_commands_.AddCommand(&cmd_ud1_);
+    serial_commands_.AddCommand(&cmd_dd1_);
+    serial_commands_.AddCommand(&cmd_ud10_);
+    serial_commands_.AddCommand(&cmd_dd10_);  
+  #endif
+  
   Serial.println();
   Serial.println(F(Program_Name));
   Serial.println(F(Program_Version));
@@ -737,13 +754,16 @@ void setup()
   Wire.setClock(400000L); 
   #endif // INA219 
 
+  #ifdef GPSDO_MCP4725
   // Setup I2C DAC, read voltage on PB0
   adjusted_DAC_output = default_DAC_output; // initial DAC value
   dac.begin(0x60);
   // Output Vctl to DAC, but do not write to DAC EEPROM 
   dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096 so 2048 should be 1/2 Vdd = approx. 1.65V
-  analogReadResolution(12); // make sure we read 12 bit values when we read from PB0
-  Wire.setClock(400000L); 
+  #endif
+  
+  // Make sure ADC resolution is 12-bit
+  analogReadResolution(12);
 
   #ifdef GPSDO_AHT10
   if (! aht.begin()) {
@@ -1292,6 +1312,7 @@ void docalibration()
   force_calibration_flag = false; // reset flag, calibration done
 }
 
+#ifdef GPSDO_MCP4725
 void adjustVctlDAC()
 // This should reach a stable DAC output value / a stable 10000000.00 frequency
 // after an hour or so
@@ -1321,6 +1342,7 @@ void adjustVctlDAC()
   // or do nothing because avgfrequency over last 100s is 10000000.00Hz
   must_adjust_DAC = false; // clear flag and we are done
 }
+#endif
 
 void adjustVctlPWM()
 // This should reach a stable DAC output value / a stable 10000000.00 frequency
@@ -1487,11 +1509,14 @@ void printGPSDOstats(Stream &Serialx)
 
   Serialx.println();
   Serialx.println(F("Voltages: "));
+
+  #ifdef GPSDO_MCP4725
   float Vctl = (float(avgdacVctl)/4096) * 3.3;
-  Serialx.print("Vctl: ");
+  Serialx.print("VctlDAC: ");
   Serialx.print(Vctl);
   Serialx.print("  DAC: ");
   Serialx.println(adjusted_DAC_output);
+  #endif
 
   float Vctlp = (float(avgpwmVctl)/4096) * 3.3;
   Serialx.print("VctlPWM: ");
