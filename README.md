@@ -44,6 +44,17 @@ I have decided to build my own version of a **10MHz GPSDO** with the following f
   - [A quick discussion of noise, DAC resolution and OCXO frequency control](docs/DAC_resolution_discussion.md)
   - [Notes on using a software 16-bit PWM DAC instead of an external 12-bit I2C DAC](docs/DAC_STM32_16bit_PWM_notes.md)
 
+## Resolution of 10MHz
+
+|   10 MHz |    |        | 1 ppm (10^-6) |       | 1 ppb (10^-9) |
+|---------:|----|-------:|---------------|------:|---------------|
+| 10000000 | Hz | 1E+06  | ppm           | 1E+09 | ppb           |
+|       10 | Hz |      **1** | **ppm**           |  1000 | ppb           |
+|        1 | Hz |    0,1 | ppm           |   100 | ppb           |
+|      0,1 | Hz |   0,01 | ppm           |    10 | ppb           |
+|     0,01 | Hz |  0,001 | ppm           |     **1** | **ppb**           |
+|    0,001 | Hz | 0,0001 | ppm           |   0,1 | ppb           |
+
 ## Schematics
 
 Latest (0.6.2 revision) schematics are available here: [EDA/Schematics-STM32-GPSDO-0.6.2.pdf](EDA/Schematics-STM32-GPSDO-0.6.2.pdf)
@@ -68,8 +79,7 @@ https://www.youtube.com/watch?v=mgoK4KuVDhw
 ## Links
 
 - GPS
-  - [Timing and Location Performance of Recent u-blox GNSS Receiver Modules by John Ackermann N8UR](https://hamsci.org/sites/default/files/publications/2020_TAPR_DCC/N8UR_GPS_Evaluation_August2020.pdf
-)
+  - [Timing and Location Performance of Recent u-blox GNSS Receiver Modules by John Ackermann N8UR](https://hamsci.org/sites/default/files/publications/2020_TAPR_DCC/N8UR_GPS_Evaluation_August2020.pdf)
     
 ## License
 
