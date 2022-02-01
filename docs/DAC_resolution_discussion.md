@@ -1,5 +1,4 @@
-A quick discussion of noise, DAC resolution and OCXO frequency control
-======================================================================
+# A quick discussion of noise, DAC resolution and OCXO frequency control
 
 The STM32 GPSDO can use either an inexpensive 12-bit I2C DAC (MCP4725) module, or a couple of rc filters on one of the PWM pins of the STM32 MCU, to generate Vctl - the voltage used to control the frequency of the OCXO over a narrow range of 10MHz +/- a few Hz. The exact OCXO frequency provided by varying Vctl over a 0V - 4.4V range depends on the OCXO used as well as a number of different factors, but roughly speaking the precision of the OCXO frequency relative to a precise 10MHz is directly proportional to the precision with which we can set Vctl.
 
@@ -10,8 +9,7 @@ Back to the theory, the GPS receiver when locked with a good fix provides a 1PPS
 
 So in theory if we measure the OCXO frequency based on the 1PPS pulse over 1000 seconds (1000 sequential measurements), the maximum measurement error should be < 0.001Hz, or 10E-10 or 0.1ppb. That's exactly an order of magnitude better than what our 12-bit DAC is capable of.
 
-Using a 16-bit DAC provided by a PWM signal
-===========================================
+## Using a 16-bit DAC provided by a PWM signal
 
 The above reasoning led me to test a 16-bit DAC built by connecting a pair of rc filters to the PWM output of the STM32 MCU. Because the STM32 timers are 16-bit timers, we can with four lines of C obtain a 2kHz 16-bit PWM signal from the MCU, which is converted to a DC value (plus a ton of noise) and hence provides us with a 16-bit DAC, which we can use to control the OCXO Vctl. That's 16x more resolution than our 12-bit DAC can provide, at least in theory.
 
@@ -21,8 +19,7 @@ The anecdotal data I have collected so far seems to indicate that yes, we do. Th
 
 Of course I would need an even better clock to confirm to which degree these readings are correct, and I don't have access to such expensive equipment right now.
 
-Can we do even better?
-======================
+## Can we do even better?
 
 The question here is whether we could use a measurement period of 10,000 seconds and target a precision of 10E-11 or 0.01ppb for our STM32 GPSDO breadboard prototype, by either "dithering" the 16-bit PWM signal or mixing two 16-bit PWM signals with different amplitudes to increase the resolution of our software-based DAC by another 4 bits or so.
 
@@ -32,13 +29,13 @@ As already mentioned, my initial precision target for the STM32 GPSDO project wa
 
 For a DIY home project following the time-proven K.I.S.S. principle, costing less than $40 and assembled on a breadboard, these are more than good enough results.
 
-An anecdotal data point
-=======================
+## An anecdotal data point
 
 This is what the STM32 GPSDO reports either on USB serial or Bluetooth serial (but not both), once per second:
 
 Wait for GPS fix max. 1 second
 
+```text
 $GNGSA,A,3,31,25,12,18,02,29,20,,,,,,2.23,1.37,1.76*1E
 $GNGSA1,,86,49,215,*6B
 $GNGLL,4833.64512,N,00746.91322,E,092423.00,A,A*7F
@@ -72,6 +69,4 @@ Pressure = 1021.0 hPa
 Approx altitude = 48.9 m
 AHT10 Temperature: 22.15 *C
 Humidity: 77.75% rH
-
-
-
+```

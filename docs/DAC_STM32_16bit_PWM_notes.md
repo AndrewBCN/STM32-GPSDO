@@ -1,17 +1,19 @@
-Notes on using a software 16-bit PWM DAC instead of an external 12-bit I2C DAC
-==============================================================================
+# Notes on using a software 16-bit PWM DAC instead of an external 12-bit I2C DAC
 
 To generate Vctl, the analog voltage that control the OCXO frequency, the STM32 GPSDO
 uses either a $0.50 MCP4725 I2C 12-bit DAC module or a pair of rc filters (2 x r=20k,
 2 x c=10uF) connected to a 16-bit, 2kHz PWM output pin on the STM32F411CEU6.
 
 Only 4 lines of C are required to generate this 2kHz PWM signal:
+
+```c
   // generate a test 2kHz square wave on PB9 PWM pin, using Timer 4 channel 4
   // PB9 is Timer 4 Channel 4 from Arduino_Core_STM32/variants/STM32F4xx/F411C(C-E)(U-Y)/PeripheralPins_BLACKPILL_F411CE.c
   analogWrite(PB9, 127);      // configures PB9 as PWM output pin at default frequency (1kHz) and resolution (8 bits), 50% duty cycle
   analogWriteFrequency(2000); // default PWM frequency is 1kHz, change it to 2kHz
   analogWriteResolution(16);  // set PWM resolution to 16 bits, default is 8 bits
   analogWrite(PB9, 32767);    // 32767 for 16 bits -> 50% duty cycle so a square wave
+```
 
 Initially I was worried that the software 16-bit PWM DAC would not provide a clean Vctl to
 precisely control the OCXO frequency, but after extensive testing I now believe it is a better
@@ -19,6 +21,6 @@ solution than the external MCP4725 12-bit I2C DAC module.
 
 With the MCP4725 12-bit DAC the STM32 GPSDO stabilizes the OCXO frequency within +/- 1ppb
 (that is +/- 0.01Hz).
-But with the 16-bit PWM software DAC, the STM32 GPSDO manages to stabilize the OCXO frequency
-within +/- 0.1ppb (a stable and accurate 10MHz +/- 0.001Hz), which is an order of magnitude
+**But with the 16-bit PWM software DAC, the STM32 GPSDO manages to stabilize the OCXO frequency
+within +/- 0.1ppb (a stable and accurate 10MHz +/- 0.001Hz)**, which is an order of magnitude
 better and rather good performance considering the cost and simplicity of the hardware.
