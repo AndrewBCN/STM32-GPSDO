@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  STM32 GPSDO v0.05b by André Balsa, February 2022
+  STM32 GPSDO v0.05c by André Balsa, February 2022
   GPLV3 license
   Reuses small bits of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
   From version 0.03 includes a command parser, so the GPSDO can receive commands from the USB serial or
@@ -120,7 +120,7 @@
 // 2. Refactor the setup and main loop functions to make them as simple as possible.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.05b"
+#define Program_Version "v0.05c"
 #define Author_Name "André Balsa"
 
 // Define hardware options
@@ -157,7 +157,6 @@
 
 const uint16_t waitFixTime = 1;         // Maximum time in seconds waiting for a fix before reporting no fix / yes fix
                                         // Tested values 1 second and 5 seconds, 1s recommended
-
 
 #include <movingAvg.h>                  // https://github.com/JChristensen/movingAvg , needs simple patch
                                         // to avoid warning message during compilation
@@ -395,6 +394,26 @@ void cmd_tunnel(SerialCommands* sender)
   sender->GetSerial()->println("Switching to USB Serial <-> GPS tunnel mode");
 }
 
+// called for SP (set PWM) command
+void cmd_setPWM(SerialCommands* sender)
+{
+  uint16_t pwm;
+  char* pwm_str = sender->Next();
+  if (pwm_str == NULL)
+  {
+    sender->GetSerial()->println("No PWM value specified, using default");
+    pwm = default_PWM_output;
+  }
+  else 
+  {
+    pwm = atoi(pwm_str);
+  }
+  sender->GetSerial()->print("Setting PWM value ");
+  sender->GetSerial()->println(pwm);
+  adjusted_PWM_output = pwm;
+  analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
+}
+
 // called for up10 (increase PWM 10 bits) command
 void cmd_up10(SerialCommands* sender)
 {
@@ -466,6 +485,7 @@ SerialCommand cmd_version_("V", cmd_version);
 SerialCommand cmd_flush_("F", cmd_flush);
 SerialCommand cmd_calibrate_("C", cmd_calibrate);
 SerialCommand cmd_tunnel_("T", cmd_tunnel);
+SerialCommand cmd_setPWM_("SP", cmd_setPWM); // note this command takes a 16-bit PWM value (1 to 65535) as an argument
 // coarse adjust
 SerialCommand cmd_up10_("up10", cmd_up10);
 SerialCommand cmd_ud10_("ud10", cmd_ud10);
@@ -731,6 +751,7 @@ void setup()
   serial_commands_.AddCommand(&cmd_flush_);
   serial_commands_.AddCommand(&cmd_calibrate_);
   serial_commands_.AddCommand(&cmd_tunnel_);
+  serial_commands_.AddCommand(&cmd_setPWM_);
   
   serial_commands_.AddCommand(&cmd_up10_);
   serial_commands_.AddCommand(&cmd_ud10_);
