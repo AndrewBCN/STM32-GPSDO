@@ -1737,17 +1737,28 @@ void printGPSDOstats(Stream &Serialx)
   Serialx.println(F(" Hz"));
   Serialx.print("10s Frequency Avg: ");
   Serialx.print(avgften,1);
-  Serialx.println(F(" Hz"));
+  Serialx.print(F(" Hz"));
+  Serialx.print(F("  count: "));
+  Serialx.println(cbiten_newest);
+  //
   Serialx.print("100s Frequency Avg: ");
   Serialx.print(avgfhun,2);
-  Serialx.println(F(" Hz"));
+  Serialx.print(F(" Hz"));
+  Serialx.print(F("  count: "));
+  Serialx.println(cbihun_newest);
+  //
   Serialx.print("1,000s Frequency Avg: ");
   Serialx.print(avgftho,3);
-  Serialx.println(F(" Hz"));
+  Serialx.print(F(" Hz"));
+  Serialx.print(F("  count: "));
+  Serialx.println(cbitho_newest);
+  //
   Serialx.print("10,000s Frequency Avg: ");
   Serialx.print(avgftth,4);
-  Serialx.println(F(" Hz"));  
-
+  Serialx.print(F(" Hz"));
+  Serialx.print(F("  count: "));
+  Serialx.println(cbitth_newest);
+  
   #ifdef GPSDO_BMP280_SPI
   // BMP280 measurements
   Serialx.println();
@@ -2075,7 +2086,7 @@ void displayscreen_LCD()
   disp.setTextSize(1);
   disp.setCursor(144, 19);
   // due to some unknown issue in printing the freq digits/unit we clear the section of the display first
-  disp.fillRect(146, 19, 13, 17, ST7735_BLACK);
+  disp.fillRect(144, 19, 15, 20, ST7735_BLACK);
   disp.print("Hz");
 
   // clock and date
