@@ -1,5 +1,5 @@
 /*******************************************************************************************************
-  STM32 GPSDO v0.04h by André Balsa, June 2021
+  STM32 GPSDO v0.05a by André Balsa, June 2021
   GPLV3 license
   Reuses small bits of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
   From version 0.03 includes a command parser, so the GPSDO can receive commands from the USB serial or
@@ -117,16 +117,16 @@
 // 2. Refactor the setup and main loop functions to make them as simple as possible.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.04h"
+#define Program_Version "v0.05a"
 #define Author_Name "André Balsa"
 
 // Define hardware options
 // -----------------------
 #define GPSDO_OLED            // SSD1306 128x64 I2C OLED display
-#define GPSDO_MCP4725         // MCP4725 I2C 12-bit DAC
+// #define GPSDO_MCP4725         // MCP4725 I2C 12-bit DAC
 #define GPSDO_PWM_DAC         // STM32 16-bit PWM DAC, requires two rc filters (2xr=20k, 2xc=10uF)
-#define GPSDO_AHT10           // I2C temperature and humidity sensor
-#define GPSDO_GEN_2kHz        // generate 2kHz square wave test signal on pin PB9 using Timer 4
+// #define GPSDO_AHT10           // I2C temperature and humidity sensor
+// #define GPSDO_GEN_2kHz        // generate 2kHz square wave test signal on pin PB9 using Timer 4
 #define GPSDO_BMP280_SPI      // SPI atmospheric pressure, temperature and altitude sensor
 // #define GPSDO_INA219          // INA219 I2C current and voltage sensor
 // #define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
@@ -138,8 +138,8 @@
 
 // Includes
 // --------
-#if !defined(STM32_CORE_VERSION) || (STM32_CORE_VERSION  < 0x02000000)
-#error "Due to API change, this sketch is compatible with STM32_CORE_VERSION  >= 0x02000000"
+#if !defined(STM32_CORE_VERSION) || (STM32_CORE_VERSION  < 0x02020000)
+#error "Due to API changes, this sketch is compatible with STM32_CORE_VERSION >= 0x02020000 (2.2.0 or later)"
 #endif
 
 // Increase HardwareSerial (UART) TX and RX buffer sizes from default 64 characters to 256.
@@ -368,9 +368,11 @@ void cmd_up10(SerialCommands* sender)
 // called for ud10 (increase DAC 10 bits) command
 void cmd_ud10(SerialCommands* sender)
 {
+  #ifdef GPSDO_MCP4725
   adjusted_DAC_output = adjusted_DAC_output + 10;
   dac.setVoltage(adjusted_DAC_output, false);
   sender->GetSerial()->println("increased DAC 10 bits");
+  #endif // MCP4725
 }
 // called for dp10 (decrease PWM 10 bits) command
 void cmd_dp10(SerialCommands* sender)
@@ -382,9 +384,11 @@ void cmd_dp10(SerialCommands* sender)
 // called for dd10 (decrease DAC 10 bits) command
 void cmd_dd10(SerialCommands* sender)
 {
+  #ifdef GPSDO_MCP4725
   adjusted_DAC_output = adjusted_DAC_output - 10;
   dac.setVoltage(adjusted_DAC_output, false);
   sender->GetSerial()->println("decreased DAC 10 bits");
+  #endif // MCP4725
 }
 
 // called for up1 (increase PWM 1 bit) command
@@ -397,9 +401,11 @@ void cmd_up1(SerialCommands* sender)
 // called for ud1 (increase DAC 1 bit) command
 void cmd_ud1(SerialCommands* sender)
 {
+  #ifdef GPSDO_MCP4725
   adjusted_DAC_output = adjusted_DAC_output + 1;
   dac.setVoltage(adjusted_DAC_output, false);
   sender->GetSerial()->println("increased DAC 1 bit");
+  #endif // MCP4725
 }
 // called for dp1 (decrease PWM 1 bit) command
 void cmd_dp1(SerialCommands* sender)
@@ -411,9 +417,11 @@ void cmd_dp1(SerialCommands* sender)
 // called for dd1 (decrease DAC 1 bit) command
 void cmd_dd1(SerialCommands* sender)
 {
+  #ifdef GPSDO_MCP4725
   adjusted_DAC_output = adjusted_DAC_output - 1;
   dac.setVoltage(adjusted_DAC_output, false);
   sender->GetSerial()->println("decreased DAC 1 bit");
+  #endif // MCP4725
 }
 
 //Note: Commands are case sensitive
@@ -736,11 +744,13 @@ void setup()
   Wire.setClock(400000L); 
   #endif // INA219 
 
+  #ifdef GPSDO_MCP4725
   // Setup I2C DAC, read voltage on PB0
   adjusted_DAC_output = default_DAC_output; // initial DAC value
   dac.begin(0x60);
   // Output Vctl to DAC, but do not write to DAC EEPROM 
   dac.setVoltage(adjusted_DAC_output, false); // min=0 max=4096 so 2048 should be 1/2 Vdd = approx. 1.65V
+  #endif // MCP4725 
   analogReadResolution(12); // make sure we read 12 bit values when we read from PB0
   Wire.setClock(400000L); 
 
@@ -1238,10 +1248,15 @@ void docalibration()
   Serial.print(F("Calibration done."));
   Serial.println();
   #endif // BLUETOOTH
+
+  #ifdef GPSDO_OLED
+  disp.clear();  
+  #endif // OLED 
   
   force_calibration_flag = false; // reset flag, calibration done
 }
 
+#ifdef GPSDO_MCP4725
 void adjustVctlDAC()
 // This should reach a stable DAC output value / a stable 10000000.00 frequency
 // after an hour or so
@@ -1271,6 +1286,7 @@ void adjustVctlDAC()
   // or do nothing because avgfrequency over last 100s is 10000000.00Hz
   must_adjust_DAC = false; // clear flag and we are done
 }
+#endif // MCP4725
 
 void adjustVctlPWM()
 // This should reach a stable DAC output value / a stable 10000000.00 frequency
@@ -1437,11 +1453,13 @@ void printGPSDOstats(Stream &Serialx)
 
   Serialx.println();
   Serialx.println(F("Voltages: "));
+  #ifdef GPSDO_MCP4725
   float Vctl = (float(avgdacVctl)/4096) * 3.3;
   Serialx.print("Vctl: ");
   Serialx.print(Vctl);
   Serialx.print("  DAC: ");
   Serialx.println(adjusted_DAC_output);
+  #endif // MCP4725
 
   float Vctlp = (float(avgpwmVctl)/4096) * 3.3;
   Serialx.print("VctlPWM: ");
