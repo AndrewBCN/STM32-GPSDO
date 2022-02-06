@@ -1188,8 +1188,7 @@ void tunnelgps()
 }
 void docalibration()
 // GPSDO calibration routine
-{
-  unsigned long startWarmup = millis(); // we need a rough timer
+{  
   if (ocxo_needs_warming) {
     // spend a few seconds/minutes here waiting for the OCXO to warm
     // show countdown timer on OLED display
