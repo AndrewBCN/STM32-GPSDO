@@ -396,22 +396,25 @@ void cmd_tunnel(SerialCommands* sender)
 
 // called for SP (set PWM) command
 void cmd_setPWM(SerialCommands* sender)
-{
-  uint16_t pwm;
+{ 
+  uint32_t pwm;
   char* pwm_str = sender->Next();
   if (pwm_str == NULL)
   {
     sender->GetSerial()->println("No PWM value specified, using default");
-    pwm = default_PWM_output;
-  }
-  else 
-  {
+    pwm = default_PWM_output;    
+  } else {  
     pwm = atoi(pwm_str);
-  }
-  sender->GetSerial()->print("Setting PWM value ");
-  sender->GetSerial()->println(pwm);
-  adjusted_PWM_output = pwm;
-  analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
+    if ( pwm >= 0 && pwm <= 65535)
+    {
+      sender->GetSerial()->print("Setting PWM value ");
+      sender->GetSerial()->println(pwm);
+      adjusted_PWM_output = pwm;
+      analogWrite(VctlPWMOutputPin, adjusted_PWM_output);      
+    } else {
+      sender->GetSerial()->println("Insert PWM correct value which is >0 and <65535");    
+    }
+  }  
 }
 
 // called for up10 (increase PWM 10 bits) command
