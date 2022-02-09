@@ -18,6 +18,7 @@
 **********************************************************************************************************/
 
 // GPSDO with STM32 MCU, optional OLED/LCD display, various sensors, DFLL in software, optional Bluetooth
+// ADF435x for additional frequency generation added
 
 /**********************************************************************************************************
   This Arduino with STM32 Core package sketch implements a GPSDO with display options. It uses an SSD1306 
@@ -126,7 +127,7 @@
 // 2. Refactor the setup and main loop functions to make them as simple as possible.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.05d"
+#define Program_Version "v0.06d"
 #define Author_Name "André Balsa"
 
 // Debug options
@@ -155,6 +156,7 @@
 // #define GPSDO_PICDIV          // generate a 1.2s synchronization pulse for the picDIV
 #define OCXO_CTI_OSC5A2B02     // which type of OCXO is in hardware
 //#define OCXO_NDK_ENE3311B     // which type of OCXO is in hardware
+#define GPSDO_ADF4351
 
 // Includes
 // --------
@@ -260,10 +262,22 @@ const uint16_t default_DAC_output = 2400; // 12-bit value, varies from OCXO to O
                                           // 2180 for a second NDK ENE3311B
 uint16_t adjusted_DAC_output;             // we adjust this value to "close the loop" of the DFLL when using the DAC
 #endif // MCP4725
-                                           // 35585 for a second NDK ENE3311B
+
+#ifdef GPSDO_ADF4351
+#include <SPI.h>
+//  code: v0.4, 27 Aug 2016, Barry Chambers, G8AGN
+// we want to use dedicated SPI interface for improved phase noise
+//               MOSI  MISO  SCLK
+SPIClass mySPI2 (PB15, PB14, PB13);
+
+#define ADF435x_LE PB12           // sets pin for load enable
+uint32_t regs[6];
+
+#endif // ADF4351
+
 #ifdef OCXO_NDK_ENE3311B
 const uint16_t default_PWM_output = 35585; // "ideal" 16-bit PWM value, varies with OCXO, RC network, and time and temperature
-                                           // NDK ENE3311B
+                                           // 35585 for NDK ENE3311B
 #endif // NDK ENE3311B
 #ifdef OCXO_CTI_OSC5A2B02
 const uint16_t default_PWM_output = 43600; // "ideal" 16-bit PWM value, varies with OCXO, RC network, and time and temperature
@@ -313,7 +327,8 @@ int16_t avgpwmVctl = 0;
 #include <Adafruit_BMP280.h>
 #define BMP280_CS   (PA4)              // SPI1 uses PA4, PA5, PA6, PA7
 Adafruit_BMP280 bmp(BMP280_CS);        // hardware SPI, use PA4 as Chip Select
-const uint16_t PressureOffset = 1860;  // that offset must be calculated for your sensor and location
+const uint16_t PressureOffset = 0;     // was 1860 that offset must be calculated for your sensor and location
+const uint16_t AltitudeOffset = 50;    // that offset must be calculated for your sensor and location
 float bmp280temp=0.0, bmp280pres=0.0, bmp280alti=0.0; // read sensor, save here
 #endif // BMP280_SPI
 
@@ -414,6 +429,23 @@ const uint16_t tunnelSecs = 300;                // tunnel mode timeout in second
 #endif  // TunnelModeTesting
 
 // Miscellaneous functions
+#ifdef GPSDO_ADF4351
+// subroutines for AFD4351 registers
+void WriteRegister32(const uint32_t value)    //Programm a register with 32 bits
+{
+  digitalWrite(ADF435x_LE, LOW);    //pin 10 on synth chip
+  for (int i = 3; i >= 0; i--)     // loop over 4 x 8bits
+    mySPI2.transfer((value >> 8 * i) & 0xFF); // shift, masking the byte and sending via SPI
+  digitalWrite(ADF435x_LE, HIGH);
+  digitalWrite(ADF435x_LE, LOW);
+}
+
+void SetADF435x()  // Programme all the registers of the ADF4350/1
+{ for (int i = 5; i >= 0; i--)  // start with register R5
+    WriteRegister32(regs[i]);
+}
+#endif  // ADF4351
+
 
 // SerialCommands callback functions
 // This is the default handler, and gets called when no other command matches. 
@@ -1423,18 +1455,30 @@ void printGPSDOstats(Stream &Serialx)
   Serialx.print(F("Frequency: "));
   Serialx.print(calcfreq64);
   Serialx.println(F(" Hz"));
+  
   Serialx.print("10s Frequency Avg: ");
   Serialx.print(avgften,1);
-  Serialx.println(F(" Hz"));
+  Serialx.print(F(" Hz"));
+  Serialx.print(F("  count: "));
+  Serialx.println(cbiten_newest);
+    
   Serialx.print("100s Frequency Avg: ");
   Serialx.print(avgfhun,2);
-  Serialx.println(F(" Hz"));
+  Serialx.print(F(" Hz"));
+  Serialx.print(F("  count: "));
+  Serialx.println(cbihun_newest);
+
   Serialx.print("1,000s Frequency Avg: ");
   Serialx.print(avgftho,3);
-  Serialx.println(F(" Hz"));
+  Serialx.print(F(" Hz"));
+  Serialx.print(F("  count: "));
+  Serialx.println(cbitho_newest);
+
   Serialx.print("10,000s Frequency Avg: ");
   Serialx.print(avgftth,4);
-  Serialx.println(F(" Hz"));  
+  Serialx.print(F(" Hz"));  
+  Serialx.print(F("  count: "));
+  Serialx.println(cbitth_newest);
 
   #ifdef GPSDO_BMP280_SPI
   // BMP280 measurements
@@ -1446,7 +1490,7 @@ void printGPSDOstats(Stream &Serialx)
   Serialx.print((bmp280pres+PressureOffset)/100, 1);
   Serialx.println(" hPa");
   Serialx.print(F("Approx altitude = "));
-  Serialx.print(bmp280alti, 1); /* Adjusted to local forecast! */
+  Serialx.print(bmp280alti+AltitudeOffset, 1); /* Adjusted to local forecast! */
   Serialx.println(" m");
   #endif // BMP280_SPI
 
@@ -1982,6 +2026,28 @@ void setup()
                   Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
   #endif // BMP280_SPI
   
+  #ifdef GPSDO_ADF4351    
+  // connect OCXO 10Mhz to ref input 
+  pinMode(ADF435x_LE, OUTPUT);          // Setup chip select pin
+  // genrerate register values with AD SW for EVAL-ADF4351
+  // actual 50MHz out, 10MHz reference
+  regs[0] = 0xA00000;
+  regs[1] = 0x8008011;
+  regs[2] = 0x4E42;
+  regs[3] = 0x4B3;
+  regs[4] = 0xE5003C;
+  regs[5] = 0x580005;
+
+  digitalWrite(ADF435x_LE, HIGH);    // disable access by default
+  mySPI2.begin();                    // Init SPI bus
+  mySPI2.setDataMode(SPI_MODE0);     // CPHA = 0 and Clock active when high
+  mySPI2.setBitOrder(MSBFIRST);      // deal with bytes MSB first
+  
+  SetADF435x();  // Programm all the registers of the ADF4350/1
+  Serial.println(F("ADF435x initialized"));
+  SetADF435x();  // Programm again, will never come back here
+ #endif  //ADF4351        
+
   Serial.println(F("GPSDO Starting"));
   Serial.println();
 
