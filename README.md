@@ -25,3 +25,7 @@ The first breadboard prototype:
 
 In normal operation this is displayed on the small OLED:
 <img src="https://github.com/AndrewBCN/STM32-GPSDO/raw/main/OLEDv002i_expl.jpg">
+
+In normal operation this is displayed on the 1.8" LCD:
+<img src="https://github.com/Badwater-Frank/STM32-GPSDO/blob/LCD-STM7735-SPI-160x128/LCD-160x128_3s.jpg">
+
