@@ -29,3 +29,8 @@ In normal operation this is displayed on the small OLED:
 In normal operation this is displayed on the 1.8" LCD:
 <img src="https://github.com/Badwater-Frank/STM32-GPSDO/blob/LCD-STM7735-SPI-160x128/LCD-160x128_3s.jpg">
 
+ADF4351 module with low noise regulator:
+<img src="https://github.com/Badwater-Frank/STM32-GPSDO/blob/LCD-STM7735-SPI-160x128/ADF4351_module.jpg">
+
+The module is connected to a dedicaed SPI interface which does not have any transition in normal operation mode to improve phase noise.
+
