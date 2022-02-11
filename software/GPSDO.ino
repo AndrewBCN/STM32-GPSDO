@@ -1,5 +1,5 @@
 /**********************************************************************************************************
-  STM32 GPSDO v0.05d by André Balsa, February 2022
+  STM32 GPSDO v0.05e by André Balsa, February 2022
   GPLV3 license
   Reuses small bits of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
   From version 0.03 includes a command parser, so the GPSDO can receive commands from the USB serial or
@@ -127,7 +127,7 @@
 // 2. Refactor the setup and main loop functions to make them as simple as possible.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.06d"
+#define Program_Version "v0.06e"
 #define Author_Name "André Balsa"
 
 // Debug options
@@ -490,21 +490,32 @@ void cmd_tunnel(SerialCommands* sender)
 // called for SP (set PWM) command
 void cmd_setPWM(SerialCommands* sender)
 {
-  uint16_t pwm;
+  int32_t pwm;
   char* pwm_str = sender->Next();
-  if (pwm_str == NULL)
+  if (pwm_str == NULL) // check if a value was specified
   {
     sender->GetSerial()->println("No PWM value specified, using default");
     pwm = default_PWM_output;
+    adjusted_PWM_output = pwm;
+    analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
+    strcpy(trendstr, " Cdf");
   }
-  else 
+  else // check the value that was specified
   {
-    pwm = atoi(pwm_str);
+    pwm = atoi(pwm_str); // note atoi() returns zero if it cannot convert the string to a valid integer
+    if ((pwm >= 1) && (pwm <= 65535)) // check if the value specified is positive 16-bit integer
+    {
+      sender->GetSerial()->print("Setting PWM value "); // if yes, set the value
+      sender->GetSerial()->println(pwm);
+      adjusted_PWM_output = pwm;
+      analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
+      strcpy(trendstr, " Cst");
+    }
+    else // incorrect value specified, print error message
+    {
+      sender->GetSerial()->println("PWM value must be positive integer between 1 and 65535, leaving unchanged");  
+    }  
   }
-  sender->GetSerial()->print("Setting PWM value ");
-  sender->GetSerial()->println(pwm);
-  adjusted_PWM_output = pwm;
-  analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
 }
 
 // PWM direct control commands (up/down)
@@ -1055,8 +1066,9 @@ void docalibration()
   #endif // OLED
 
   #ifdef GPSDO_LCD_ST7735
+  disp.fillRect(0, 19, 160, 108, ST7735_BLACK);   // clear display if command is used
   disp.setCursor(0, 32);
-  disp.print(F("Please wait...done"));
+  disp.print(F("Warm up...done"));
   disp.setCursor(0, 40);
   disp.print(F("Calibrating...      "));    // spaces needed to overwrite previous
   disp.setCursor(0, 48);
@@ -2110,13 +2122,13 @@ void loop()
 {
   serial_commands_.ReadSerial();  // process any command from either USB serial (usually 
                                   // the Arduino monitor) xor Bluetooth serial (e.g. a smartphone)
-  if (force_calibration_flag) docalibration(); else
 
   if (tunnel_mode_flag) tunnelgps(); else
   
   if (gpsWaitFix(waitFixTime))    // wait up to waitFixTime seconds for fix, returns true if we have a fix
   {
-    #ifdef GPSDO_BLUETOOTH
+    if (force_calibration_flag) docalibration(); // if we have gps fix we can start calibration
+	#ifdef GPSDO_BLUETOOTH
     Serial2.println();
     Serial2.println();
     Serial2.print(F("Fix time "));
@@ -2255,7 +2267,9 @@ void loop()
     flush_ring_buffers_flag = true;
     strcpy(trendstr, " nof");
 	// no fix at iniial startup, set PWM to reasonable value
-    adjusted_PWM_output = default_PWM_output;     
-    analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
+    if (!force_calibration_flag) {
+       adjusted_PWM_output = default_PWM_output;     
+       analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
+	}
   }
 } // end of loop()
