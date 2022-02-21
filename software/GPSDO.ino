@@ -1,5 +1,5 @@
 /**********************************************************************************************************
-  STM32 GPSDO v0.05e by André Balsa, February 2022
+  STM32 GPSDO v0.05f by André Balsa, February 2022
   GPLV3 license
   Reuses small bits of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
   From version 0.03 includes a command parser, so the GPSDO can receive commands from the USB serial or
@@ -126,7 +126,7 @@
 // 2. Refactor the setup and main loop functions to make them as simple as possible.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.05e"
+#define Program_Version "v0.05f"
 #define Author_Name "André Balsa"
 
 // Debug options
@@ -391,17 +391,20 @@ volatile bool force_armpicDIV_flag = true;     // indicates picDIV must be armed
 volatile bool force_calibration_flag = true;   // indicates GPSDO should start calibration sequence
 
 volatile bool ocxo_needs_warming = true;       // indicates OCXO needs to warm up a few minutes after power on
+
 #ifdef FastBootMode
   const uint16_t ocxo_warmup_time = 15;        // ocxo warmup time in seconds; 15s for testing
+  const uint16_t ocxo_calib_time = 15;         // 15s fast calibration countdown time (for each calibration step)
 #else             
   const uint16_t ocxo_warmup_time = 300;       // ocxo warmup time in seconds;  300s or 600s normal use
+  const uint16_t ocxo_calib_time = 60;         // 60s normal calibration countdown time (for each calibration step)
 #endif  // FastBootMode
 
 volatile bool tunnel_mode_flag = false;        // the GPSDO relays the information directly to and from the GPS module to the USB serial
 #ifdef TunnelModeTesting
 const uint16_t tunnelSecs = 15;                // tunnel mode timeout in seconds; 15s for testing, 300s or 600s normal use
 #else
-const uint16_t tunnelSecs = 300;                // tunnel mode timeout in seconds; 15s for testing, 300s or 600s normal use
+const uint16_t tunnelSecs = 300;               // tunnel mode timeout in seconds; 15s for testing, 300s or 600s normal use
 #endif  // TunnelModeTesting
 
 // Miscellaneous functions
@@ -880,10 +883,13 @@ boolean getUBX_ACK(uint8_t *MSG) {
 }
 #endif // UBX_CONFIG
 
+// ---------------------------------------------------------------------------------------------
+//    GPSDO tunnel mode (GPS serial is relayed to Bluetooth serial or USB serial)
+// --------------------------------------------------------------------------------------------- 
 void tunnelgps()
 // GPSDO tunnel mode operation
 {
-  #ifdef GPSDO_BLUETOOTH      // print calibrating started message to either
+  #ifdef GPSDO_BLUETOOTH      // print entering tunnel mode message to either
   Serial2.println();          // Bluetooth serial xor USB serial
   Serial2.print(F("Entering tunnel mode..."));
   Serial2.println();
@@ -893,7 +899,7 @@ void tunnelgps()
   Serial.println();
   #endif // BLUETOOTH
 
-  // tunnel mode operation goes here
+  // tunnel mode operation starts here
   uint32_t endtunnelmS = millis() + (tunnelSecs * 1000);
   uint8_t GPSchar;
   uint8_t PCchar;
@@ -902,17 +908,29 @@ void tunnelgps()
     if (Serial1.available() > 0)
     {
       GPSchar = Serial1.read();
-      Serial.write(GPSchar);  // echo NMEA stream to USB serial
+      #ifdef GPSDO_BLUETOOTH
+      Serial2.write(GPSchar); // echo GPS NMEA serial stream to Bluetooth serial
+      #else      
+      Serial.write(GPSchar);  // echo GPS NMEA serial stream to USB serial
+      #endif // BLUETOOTH
     }
+    #ifdef GPSDO_BLUETOOTH
+    if (Serial2.available() > 0)
+    #else
     if (Serial.available() > 0)
+    #endif // BLUETOOTH
     {
+      #ifdef GPSDO_BLUETOOTH
+      PCchar = Serial2.read();
+      #else
       PCchar = Serial.read();
-      Serial1.write(PCchar);  // echo PC stream to GPS serial
+      #endif // BLUETOOTH
+      Serial1.write(PCchar);  // echo USB serial stream to GPS serial
     }
   }
   // tunnel mode operation ends here
   
-  #ifdef GPSDO_BLUETOOTH      // print calibrating started message to either
+  #ifdef GPSDO_BLUETOOTH      // print exiting tunnel mode message to either
   Serial2.println();          // Bluetooth serial xor USB serial
   Serial2.print(F("Tunnel mode exited."));
   Serial2.println();
@@ -923,20 +941,21 @@ void tunnelgps()
   #endif // BLUETOOTH
   
   tunnel_mode_flag = false; // reset flag, exit tunnel mode
-}
-void docalibration()
-// OCXO Vctl calibration routine: find an approximate value for Vctl
+} // end of tunnel mode routine
+
+// ---------------------------------------------------------------------------------------------
+//    OCXO warmup delay routine (only needed during a GPSDO "cold start")
+// ---------------------------------------------------------------------------------------------
+void doocxowarmup()
 {
   unsigned long startWarmup = millis(); // we need a rough timer
-  if (ocxo_needs_warming) {
-    // spend a few seconds/minutes here waiting for the OCXO to warm
-    // show countdown timer on OLED display
-    // and report on either USB serial or Bluetooth serial
-    // Note: during calibration the GPSDO does not accept any commands
-    uint16_t countdown = ocxo_warmup_time;
-    while (countdown) {
-          yellow_led_state = 2;        // blink yellow LED
-    
+  // spend a few seconds/minutes here waiting for the OCXO to warm
+  // show countdown timer on OLED display
+  // and report on either USB serial or Bluetooth serial
+  // Note: during warmup the GPSDO does not accept any commands
+  uint16_t countdown = ocxo_warmup_time;
+  while (countdown) {
+              
           #ifdef GPSDO_OLED
           disp.clear();                // display warmup message on OLED
           disp.setCursor(0, 0);
@@ -982,11 +1001,22 @@ void docalibration()
           // do nothing for 1s
           delay(1000);
           countdown--;
-    }
-    ocxo_needs_warming = false; // reset flag, next "hot" calibration skips ocxo warmup 
   }
-  // proceed with calibration
-  #ifdef GPSDO_BLUETOOTH      // print calibrating started message to either
+  ocxo_needs_warming = false; // reset flag, next "hot" calibration skips ocxo warmup   
+} // end of OCXO warmup routine
+
+// ---------------------------------------------------------------------------------------------
+//    GPSDO calibration routine
+// --------------------------------------------------------------------------------------------- 
+void docalibration()
+// OCXO Vctl calibration: find an approximate value for Vctl
+{
+  yellow_led_state = 2;        // blink yellow LED (handled by 2Hz ISR)
+  
+  if (ocxo_needs_warming) doocxowarmup();
+  
+  // Note: during calibration the GPSDO does not accept any commands
+  #ifdef GPSDO_BLUETOOTH      // print calibration started message to either
   Serial2.println();          // Bluetooth serial xor USB serial
   Serial2.print(F("Calibrating..."));
   Serial2.println();
@@ -1039,27 +1069,56 @@ void docalibration()
   // 1.5V for PWM = 65536 x (1.5 / 3.2) = 30720 results in frequency f1 = 10MHz + e1
   // 2.5V for PWM = 65536 x (2.5 / 3.2) = 51200 results in frequency f2 = 10MHz + e2
   // where f2 > f1 (most OCXOs have positive slope).
+  
   double f1, f2, e1, e2;
+  
   // make sure we have a fix and data
-  while (!cbTen_full) delay(1000);
+  while (!cbTen_full) delay(1000); // note there is a small chance that we lose PPS during calibration
+                                   // resulting in completely wrong calibration value
+  
   // measure frequency for Vctl=1.5V
-  Serial.println(F("set PWM 1.5V, wait 15s"));
+  Serial.println(F("Measure frequency for Vctl=1.5V"));
+  Serial.print(F("Set PWM Vctl to 1.5V, wait ")); Serial.print(ocxo_calib_time); Serial.println(F("s"));
   analogWrite(VctlPWMOutputPin, 30720);
-  delay(15000);
-  Serial.print(F("f1 (average frequency for 1.5V Vctl): "));
+  
+  uint16_t calib_countdown = ocxo_calib_time; // note there are two possible values depending on FastBootMode setting
+  while (calib_countdown > 0)
+    {
+      calib_countdown--; 
+      Serial.print(calib_countdown); Serial.print(F("s "));
+      delay(1000);    
+    }  
+  
+  Serial.println();
+  Serial.print(F("f1 (average frequency for Vctl=1.5V): "));
   f1 = avgften;
   Serial.print(f1,1);
   Serial.println(F(" Hz"));
+  Serial.println();
+  
   // make sure we have a fix and data again
   while (!cbTen_full) delay(1000);
+  
   // measure frequency for Vctl=2.5V
-  Serial.println(F("set PWM 2.5V, wait 15s"));
+  Serial.println(F("Measure frequency for Vctl=2.5V"));
+  Serial.println(F("Set PWM Vctl to 2.5V, wait ")); Serial.print(ocxo_calib_time); Serial.println(F("s"));
   analogWrite(VctlPWMOutputPin, 51200);
-  delay(15000);
+  
+  calib_countdown = ocxo_calib_time;  // no need to declare variable again
+  while (calib_countdown > 0)
+    {
+      calib_countdown--; 
+      Serial.print(calib_countdown); Serial.print(F("s "));
+      delay(1000);    
+    }  
+  
+  Serial.println();
   Serial.print(F("f2 (average frequency for 2.5V Vctl): "));
   f2 = avgften;
   Serial.print(f2,1);
   Serial.println(F(" Hz"));
+  Serial.println();
+  
   // slope s is (f2-f1) / (51200-30720) for PWM
   // So F=10MHz +/- 0.1Hz for PWM = 30720 - (e1 / s)
   // set Vctl
@@ -1088,9 +1147,14 @@ void docalibration()
   disp.fillScreen(ST7735_BLACK);  
   #endif // LCD_ST7735 
   
+  yellow_led_state = 0;           // turn off yellow LED (handled by 2Hz ISR)
   force_calibration_flag = false; // reset flag, calibration done
-} // end of docalibration()
+} // end of GPSDO calibration routine
 
+
+// ---------------------------------------------------------------------------------------------
+//    Adjust Vctl DAC routine
+// ---------------------------------------------------------------------------------------------
 #ifdef GPSDO_MCP4725
 void adjustVctlDAC()
 // This should reach a stable DAC output value / a stable 10000000.00 frequency
@@ -1123,6 +1187,9 @@ void adjustVctlDAC()
 }
 #endif // MCP4725
 
+// ---------------------------------------------------------------------------------------------
+//    Adjust Vctl PWM routine
+// ---------------------------------------------------------------------------------------------
 #ifdef GPSDO_PWM_DAC
 void adjustVctlPWM()
 // This should reach a stable PWM output value / a stable 10000000.00 frequency
@@ -1748,6 +1815,9 @@ void uptimetostrings() {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+//    setup routine, prepares the hardware for normal operation
+// --------------------------------------------------------------------------------------------- 
 void setup()
 {
   // Wait 1 second for things to stabilize
@@ -1961,9 +2031,11 @@ void setup()
   avgVcc = avg_adcVcc.reading(adcVcc);
   # endif // VCC
   
+  #ifdef GPSDO_MCP4725
   avg_dacVctl.begin();
   dacVctl = analogRead(VctlInputPin);
   avgdacVctl = avg_dacVctl.reading(dacVctl);
+  # endif // MCP4725
   
   avg_pwmVctl.begin();
   pwmVctl = analogRead(VctlPWMInputPin);
@@ -1974,6 +2046,9 @@ void setup()
   // setup done
 }
 
+// ---------------------------------------------------------------------------------------------
+//    loop routine: this is the main loop
+// --------------------------------------------------------------------------------------------- 
 void loop()
 {
   serial_commands_.ReadSerial();  // process any command from either USB serial (usually 
