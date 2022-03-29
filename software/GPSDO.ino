@@ -725,47 +725,59 @@ void calcavg() {
     oldfcount64 = circbuf_ten64[cbiten_newest];
     // now that we have latfcount64 and oldfcount64 we can calculate the average frequency
     avgften = double(latfcount64 - oldfcount64)/10.0;   
-  }  
-  if (cbHun_full) { // we want (latest fcount - oldest fcount) / 100
+  } 
+  
+  if(cbTen_full)
+  {
+    if (cbHun_full) { // we want (latest fcount - oldest fcount) / 100
     
-    // latest fcount is always circbuf_hun[cbihun_newest-1]
-    // except when cbihun_newest is zero
-    // oldest fcount is always circbuf_hun[cbihun_newest] when buffer is full
+      // latest fcount is always circbuf_hun[cbihun_newest-1]
+      // except when cbihun_newest is zero
+      // oldest fcount is always circbuf_hun[cbihun_newest] when buffer is full
 
-    if (cbihun_newest == 0) latfcount64 = circbuf_hun64[100];
-    else latfcount64 = circbuf_hun64[cbihun_newest-1];
-    oldfcount64 = circbuf_hun64[cbihun_newest];
+      if (cbihun_newest == 0) latfcount64 = circbuf_hun64[100];
+      else latfcount64 = circbuf_hun64[cbihun_newest-1];
+      oldfcount64 = circbuf_hun64[cbihun_newest];
     
-    avgfhun = double(latfcount64 - oldfcount64)/100.0;
+      avgfhun = double(latfcount64 - oldfcount64)/100.0;
+    }
   }
-  if (cbTho_full) { // we want (latest fcount - oldest fcount) / 1000
+  
+  if(cbHun_full)
+  {
+    if (cbTho_full) { // we want (latest fcount - oldest fcount) / 1000
     
-    // latest fcount is always circbuf_tho[cbitho_newest-1]
-    // except when cbitho_newest is zero
-    // oldest fcount is always circbuf_tho[cbitho_newest] when buffer is full
+      // latest fcount is always circbuf_tho[cbitho_newest-1]
+      // except when cbitho_newest is zero
+      // oldest fcount is always circbuf_tho[cbitho_newest] when buffer is full
 
-    if (cbitho_newest == 0) latfcount64 = circbuf_tho64[1000];
-    else latfcount64 = circbuf_tho64[cbitho_newest-1];
-    oldfcount64 = circbuf_tho64[cbitho_newest];
+      if (cbitho_newest == 0) latfcount64 = circbuf_tho64[1000];
+      else latfcount64 = circbuf_tho64[cbitho_newest-1];
+      oldfcount64 = circbuf_tho64[cbitho_newest];
     
-    avgftho = double(latfcount64 - oldfcount64)/1000.0;
-    // oldest fcount is always circbuf_ten[cbiten_newest-2]
-    // except when cbiten_newest is <2 (zero or 1)
-  } 
-  if (cbTth_full) { // we want (latest fcount - oldest fcount) / 10000
+      avgftho = double(latfcount64 - oldfcount64)/1000.0;
+      // oldest fcount is always circbuf_ten[cbiten_newest-2]
+      // except when cbiten_newest is <2 (zero or 1)
+    }
+  }
+  
+  if(cbTho_full)  
+  {
+    if (cbTth_full) { // we want (latest fcount - oldest fcount) / 10000
     
-    // latest fcount is always circbuf_tth[cbitth_newest-1]
-    // except when cbitth_newest is zero
-    // oldest fcount is always circbuf_tth[cbitth_newest] when buffer is full
+      // latest fcount is always circbuf_tth[cbitth_newest-1]
+      // except when cbitth_newest is zero
+      // oldest fcount is always circbuf_tth[cbitth_newest] when buffer is full
 
-    if (cbitth_newest == 0) latfcount64 = circbuf_tth64[10000];
-    else latfcount64 = circbuf_tth64[cbitth_newest-1];
-    oldfcount64 = circbuf_tth64[cbitth_newest];
+      if (cbitth_newest == 0) latfcount64 = circbuf_tth64[10000];
+      else latfcount64 = circbuf_tth64[cbitth_newest-1];
+      oldfcount64 = circbuf_tth64[cbitth_newest];
     
-    avgftth = double(latfcount64 - oldfcount64)/10000.0;
-    // oldest fcount is always circbuf_ten[cbiten_newest-2]
-    // except when cbiten_newest is <2 (zero or 1)
-  } 
+      avgftth = double(latfcount64 - oldfcount64)/10000.0;
+      // oldest fcount is always circbuf_ten[cbiten_newest-2]
+      // except when cbiten_newest is <2 (zero or 1)
+    } 
+  }
 }
 
 void flushringbuffers(void) {
