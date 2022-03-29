@@ -356,7 +356,13 @@ volatile bool cbHes_full = false;         // flag set when buffer has filled up
 volatile double avgesample = 0;           // 100 seconds average with 10s sampling rate
 
 // other OCXO frequency measurement data structures
-volatile uint32_t lsfcount=0, previousfcount=0, calcfreqint=10000000;
+volatile uint32_t basefreq=10000000;
+volatile uint32_t lsfcount=0, previousfcount=0, calcfreqint=basefreq;
+
+// Frequency check boundaries 
+volatile uint32_t lowerfcount = 9999500;
+volatile uint32_t upperfcount = 10000500;
+
 /* Moving average frequency variables
    Basically we store the counter captures for 10 and 100 seconds.
    When the buffers are full, the average frequency is quite simply
@@ -365,7 +371,7 @@ volatile uint32_t lsfcount=0, previousfcount=0, calcfreqint=10000000;
    Each second, when the buffers are full, we overwrite the oldest data
    with the newest data and calculate each average frequency.
  */
-volatile uint64_t fcount64=0, prevfcount64=0, calcfreq64=10000000; 
+volatile uint64_t fcount64=0, prevfcount64=0, calcfreq64=basefreq; 
 // ATTENTION! must declare 64-bit, not 32-bit variable, because of shift
 volatile uint64_t tim2overflowcounter = 0;  // testing, counts the number of times TIM2 overflows
 volatile bool overflowflag = false;         // flag set by the overflow ISR, reset by the 2Hz ISR
@@ -626,7 +632,7 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
         }
         fcount64 = (tim2overflowcounter << 32) + lsfcount; // hehe now we have a 64-bit counter
         if (fcount64 > prevfcount64) {  // if we have a new count - that happens once per second
-         if (((fcount64 - prevfcount64) > 9999500) && ((fcount64 - prevfcount64) < 10000500)) { // if we have a valid fcount, otherwise it's discarded
+         if (((fcount64 - prevfcount64) > lowerfcount) && ((fcount64 - prevfcount64) < upperfcount)) { // if we have a valid fcount, otherwise it's discarded
           logfcount64();  // save fcount in the 64-bit ring buffers
           calcfreq64 = fcount64 - prevfcount64; // the difference is exactly the OCXO frequency in Hz
          }
