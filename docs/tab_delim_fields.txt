@@ -1,0 +1,26 @@
+STM32 GPSDO reporting tab delimited fields
+
+Line no. (0 if no position fix, increments by one each second if position fix)
+timestamp (UTC)
+uptime (days hours mins secs)
+64-bit count
+frequency (Hz)
+10s freq. avg. (one decimal) (Hz)
+100s freq. avg. (two decimals) (Hz)
+1,000s freq. avg. (three decimals) (Hz)
+10,000s freq. avg. (four decimals) (Hz)
+no. of sats
+HDOP (meters)
+PWM (16-bit, 1-65535)
+PWM adc mov. avg. (V)
+Vcc adc mov. avg. (5.0V nominal)
+Vdd adc mov. avg. (3.3V nominal)
+BMP280 Temp. (C)
+BMP280 Atm. Pressure (hPa)
+AHT20 Temp. (C)
+AHT20 Humidity (%)
+INA219 OCXO Voltage (5.05V nominal)
+INA219 OCXO Current (mA, 2A maximum)
+TIC (10-bit, 1024ns max)
+
+When a value is not available, field contains "0".

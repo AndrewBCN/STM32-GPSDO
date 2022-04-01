@@ -1,0 +1,80 @@
+Achieving a UTC-synchronized PPS using a picDIV, Lars' 1ns resolution TIC and the STM32 GPSDO
+=============================================================================================
+
+By André Derrick Balsa, March 2022 - v0.2
+
+The following documentation is part of the STM32 GPSDO documentation and covered by the same GPL V3 license.
+
+Introduction
+------------
+
+The purpose of this short paper is to examine the hardware and method/algorithm to obtain a UTC synchronized PPS (pulse per second) (within x nanoseconds, where x would be preferably < 50), given some very simple hardware, namely:
+
+- A picDIV (see http://www.leapsecond.com/pic/picdiv.htm), which is a PIC MCU programmed to divide by 10,000,000. The picDIV is an invention by Tom Van Baak.
+
+- An extremely simple 1ns resolution TIC design by Lars Walenius, slightly modified. The original 1ns resolution TIC circuit and explanations by Lars Walenius can be found here: https://github.com/AndrewBCN/Lars-DIY-GPSDO
+
+- An STM32 GPSDO: a very simple FLL-based GPS disciplined oscillator that uses a readily available STM32F411 ARM development board, designed and programmed by the author. See https://github.com/AndrewBCN/STM32-GPSDO
+
+Why a UTC-synchronized PPS?
+---------------------------
+
+The question immediately arises when one has a very precise clock in a lab, computing center or other facility on how to get it synchronized to a global network of very precise ("atomic") clocks. It is not very useful to have a clock accurate to within 1µs per year if that same clock is off by a few ms or even tens of seconds from UTC.
+
+A portable UTC-synchronized PPS generator is probably one of the simplest ways to synchronize a precision clock with UTC.
+
+Another possible use for a portable UTC-synchronized PPS generator would be to periodically measure the accuracy of a clock that is not permanently connected to a network of other precision clocks.
+
+How it works - the picDIV
+-------------------------
+
+The picDIV is used to generate the UTC-synchronized PPS signal.
+
+Here is the pinout of the picDIV (from Tom Van Baak's source code documentation):
+
+                                ---__---
+                5V (Vdd)  +++++|1      8|=====  Ground (Vss)
+         10 MHz clock in  ---->|2  pD  7|---->  1PPS out (100 us)
+        1PPS (10 ms) out  <----|3  11  6|---->  1 Hz out (50%)
+                     Arm  o--->|4      5|<+---  Sync
+                                --------
+ Notes:
+
+   o External pull-up required on Arm input (pin4/GP3).
+   + Sync input (pin5/GP2) has internal WPU.
+   Output frequency accuracy is the same as clock input accuracy.
+   Output drive current is 25 mA maximum per pin.
+   Coded for Microchip 12F675 but any '609 '615 '629 '635 '675 '683 works.
+   
+ The 10MHz clock input is driven by the 10MHz OCXO in the STM32 GPSDO circuit. The rising edge of either of the PPS outputs (pins 3 and 7) is almost synchronous with the rising edge of the 10MHz clock input (there is the small and fixed propagation delay of the picDIV). So either of the PPS outputs (pins 3 and 7) can be used as our UTC-synchronized PPS.
+ 
+ But how exactly do we synchronize the picDIV output with UTC? This is where Lars' 1ns resolution TIC and the STM32 MCU come into play. Notice the "Arm" and "Sync" inputs in the picDIV? The "Arm" input is connected to one of the GPIO pins of the STM32 MCU, and the "Sync" input is connected to the 1PPS from the GPS module.
+ 
+ How it works - Lars' 1ns resolution TIC
+ ---------------------------------------
+ 
+ TIC stands for Time Interval Counter, in other words it's a circuit that measures very small time intervals, in this case we will be measuring a 1µs maximum time interval with a (theoretical) resolution of 1ns.
+ 
+ Essentially Lars' TIC is a "black box" with two digital inputs and one analog output. The two digital inputs are wired to the GPS module 1PPS output and the picDIV 1PPS (100µs) output. The analog output is connected to one of the 12-bit ADC channels of our STM32 MCU.
+ 
+ The analog output varies almost linearly between 0 and a maximum voltage (e.g. 3.3V) proportional to the phase difference between the rising edges of the two digital inputs. If the two digital inputs are perfectly in phase, the analog output is zero. If the phase difference is 500ns, the output voltage should be the maximum voltage divided by 2 (e.g. 1.65V), and if the phase difference is >= 1000ns (1µs) the output voltage should be the maximum (e.g. 3.3V).
+ 
+ The theoretical resolution of Lars' TIC in his original circuit is approximately 1ns, and since we are using a 2-bit higher resolution ADC in the STM32, we could claim a 250ps resolution, but in practice, because of noise, jitter, non-linearities, temperature effects and other factors, the actual resolution is on the order of 25~30ns. Since we are aiming for 50ns synchronization, this is quite acceptable.
+ 
+ How it works - the STM32 MCU "closes the loop"
+ ----------------------------------------------
+ 
+ In the STM32 GPSDO, the STM32F411 MCU generates a 16-bit PWM voltage Vctl that is connected to the frequency control pin of the OCXO. In normal GPSDO operation, Vctl is the final step in closing the Frequency Locked Loop (FLL) that keeps the OCXO frequency at an exact 10MHz +/-1ppb or better.
+ 
+ However, we can also use Vctl to "close the loop" and adjust the phase of our picDIV 1PPS output. This is done in four steps:
+ 1. First, we must arm and synchronize the picDIV. To do that, the picDIV "Arm" pin is pulled low by the MCU for one second, and the next PPS pulse rising edge from the GPS module will synchronize the picDIV PPS output within 1µs.
+ 2. Second, we do the fine syncing: once per second, we measure the analog output of the TIC and if the measured voltage is larger than some preset floor (e.g 50mV), we slightly bump the frequency of the OCXO. This has the effect of progressively decreasing the phase difference / time interval measured by our TIC.
+ 3. Third, once we reach a measured time interval under 50ns, we can dial down Vctl again.
+ 4. Fourth and last, we periodically measure the TIC output and apply our feedback to Vctl if needed.
+ 
+ The net effect of this algorithm is to synchronize the 1PPS from the picDIV with the 1PPS from the GPS module (which is itself within a few ns of GPS/UTC time) within a predetermined window, which we have set arbitrarily at 50ns.
+ 
+ Conclusion
+ __________
+ 
+ We have described above how to combine a PLL loop to control phase and an FLL loop to control frequency, both implemented using inexpensive and readily available hardware. This hybrid FLL/PLL control method gives us a stable and accurate 10MHz signal and a UTC-synchronized 1PPS signal within reasonable margins.
