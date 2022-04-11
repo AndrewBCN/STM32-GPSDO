@@ -139,7 +139,7 @@
 #define Program_Name "GPSDO"
 #define Program_Version "v0.06b"
 #define Author_Name "André Balsa"
-#define Contributors "Angelo Iannelli"
+#define Contributors "Angelo Iannello"
 
 // Debug options
 // -------------
