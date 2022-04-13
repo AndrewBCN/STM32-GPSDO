@@ -1,74 +1,14 @@
 /**********************************************************************************************************
-  STM32 GPSDO v0.06b by André Balsa, April 2022 - EXPERIMENTAL RELEASE FOR TESTING PURPOSES
+  STM32 GPSDO v0.06c by André Balsa, May 2022
   GPLV3 license
-
-  Test version of the firmware to check the "offset" frequency measuring algorithm.
-  
   GitHub collaborators: iannezsp (Angelo Iannello)
-  Reuses small bits of the excellent GPS checker code Arduino sketch by Stuart Robinson - 05/04/20
-  From version 0.03 includes a command parser, so the GPSDO can receive commands from the USB serial or
-  Bluetooth serial interfaces and execute various callback functions.
-  From version 0.04 includes an auto-calibration function, enabled by default at power on. The
-  calibration process can also be launched at any time by sending the "C" command.
-  The very first calibration after power on includes an OCXO warmup delay, usually 300 seconds.
-  Version 0.04f implements a GPS receiver "tunnel mode" where the MCU simply relays the information
-  when the "T" command is received.
-  This should make it possible to connect the STM32 GPSDO to a laptop/PC running u-center.
-  Note that tunnel mode is exited automatically after a configurable timeout. There is no other way to
-  exit tunnel mode.
-  - Initial ST7735 SPI LCD display support code contributed by Badwater-Frank.
+  ST7735 SPI LCD display support code contributed by Badwater-Frank
 
   This program is supplied as is, it is up to the user of the program to decide if the program is
   suitable for the intended purpose and free from errors.
-**********************************************************************************************************/
-
-// GPSDO with STM32 MCU, optional OLED/LCD display, various sensors, DFLL in software, optional Bluetooth
-
-/**********************************************************************************************************
-  This Arduino with STM32 Core package sketch implements a GPSDO with display options. It uses an SSD1306 
-  128x64 I2C OLED display or SPI LCD. It reads the GPS for 1 or 5 seconds and copies the half-dozen or so
-  default NMEA sentences from the GPS to either the USB serial or Bluetooth serial ports (but not both) 
-  if verbose mode is enabled. That is followed by various sensors data and the FLL and OCXO data.
-  This is an example printout from a working GPSDO running firmware version v0.04e:
-   
-    Wait for GPS fix max. 1 second
-
-    $GNGSA,A,3,27,10,23,26,18,15,,,,,,,2.30,1.91,1.28*13
-    $GNGSA,A9,76,38,268,,77,23,327,,84,05,085,,85,57,052,23*61
-    $GLGSV,3,3,09,86,53,308,*5F
-    $GNGLL,4833.66284,N,00746.88237,E,134626.00,A,A*72
-    $GNRMC,134627.00,A,4833.66358,N,00746.88039,E,2.527,,050621,,,A*64
-    $GNGGA,134627.00,4833.66358,N,00746.88039,E,1,07,1.91,137.7,M,47.3,M,,*46
-    
-    Fix time 889mS
-    Uptime: 000d 00:28:44
-    New GPS Fix: 
-    Lat: 48.561058 Lon: 7.781340 Alt: 137.7m
-    Sats: 7 HDOP: 1.91
-    UTC Time: 13:46:27 Date: 5/6/2021
-    
-    Voltages: 
-    Vctl: 1.97  DAC: 2404
-    VctlPWM: 1.81  PWM: 35751
-    Vcc: 5.02
-    Vdd: 3.29
-    
-    Frequency measurements using 64-bit counter:
-    64-bit Counter: 17215439735
-    Frequency: 10000000 Hz
-    10s Frequency Avg: 10000000.0 Hz
-    100s Frequency Avg: 9999999.99 Hz
-    1,000s Frequency Avg: 9999999.997 Hz
-    10,000s Frequency Avg: 0.0000 Hz
-    
-    BMP280 Temperature = 26.6 *C
-    Pressure = 1020.0 hPa
-    Approx altitude = 57.3 m
-    AHT10 Temperature: 23.57 *C
-    Humidity: 76.48% rH
-
-  When the program detects that the GPS has a fix, it prints the information above to the USB serial
-  xor the Bluetooth serial (if the Bluetooth serial port is defined in the preprocessor directives).
+**********************************************************************************************************
+  When the program detects that the GPS has a fix, it prints status information to the USB serial
+  or the Bluetooth serial (if the Bluetooth serial port is defined in the preprocessor directives).
   If the I2C OLED display is attached that is updated as well.
 
   The USB serial port is set at 115200 baud, the Bluetooth serial port at 57600 baud, and the GPS
@@ -92,20 +32,27 @@
 **********************************************************************************************************/
 /* Commands implemented:
     - V : returns program name, version and author
+    - H : list all the commands and their parameters if any
     - F : flush ring buffers
     - C : calibrate OCXO
-    - dp/up 1/10 : adjust Vctl down/up PWM fine/coarse, example dp1 means decrease PWM by 1.
+    - dp/up 1/10 : adjust Vctl down/up PWM fine/coarse, example dp1 means decrease PWM by 1
     - SP <number> : set PWM to value between 1 and 65535
     - RD/RH : toggle between tab Delimited and Human readable GPSDO status reporting
-    - ES/ER/EE: EEPROM Save, EEPROM Recall, EEPROM Erase
+    - ES/ER/EE : EEPROM Save, EEPROM Recall, EEPROM Erase
+    - MH/MD : Mode Holdover (OCXO is not "disciplined" by GPS), Mode Disciplined
+    - PO <float value> : Pressure Offset - calibrate atmospheric pressure and altitude sensor
+    - AO <float value> : Altitude Offset - calibrate atmospheric pressure and altitude sensor
+    - AP : arm and sync picDIV
+    - TO <number>: set UTC to local time offset, between -23 and 23 (only for TM1637 clock display)
     
 /* Commands to be implemented:
-    - L0 to L9 : select log levels
-    - L0 : silence mode
-    - L1 : fix only mode
-    - L7 : fix and full status mode, no NMEA (default)
-    - L8 : NMEA stream from GPS module only mode
-    - L9 : NMEA + full status
+    - S0 to S9 : select log levels ; these only take effect in Human Readable reporting mode
+    - S0 : silence mode - no output at all
+    - S1 : one stop . every second, newline \n every minute
+    - S2 : fix only mode
+    - S7 : fix and full status mode, no NMEA (default)
+    - S8 : NMEA stream from GPS module only mode
+    - S9 : NMEA + full status
 
 /**********************************************************************************************************
   Program Operation -  This program is a GPSDO with optional OLED display. It uses a small SSD1306
@@ -117,29 +64,36 @@
   the 16-bit PWM ; this voltage (Vctl) is adjusted once every 429 seconds.
 **********************************************************************************************************/
 
-// Version v0.04i and later: Erik Kaashoek has suggested a 10s sampling rate for the 64-bit counter, to save RAM.
-// This is work in progress, see the changes in Timer2_Capture_ISR.
-
 // Version v0.05j and later: reporting on USB serial / Bluetooth serial can be toggled between human readable and tab delimited data.
 
 // Version v0.05k and later: EEPROM emulation in Flash allows for saving a 16-bit PWM DAC value (and in the future,
-// other operating parameters). Note: work in progress.
+// other operating parameters). Note that saving the values in EEPROM causes the ring buffer to get flushed.
 
 // Version v0.06b: first implementation of algorithm that uses 8-bit information about frequency offset in 
 // unified ring buffer rather than 64-bit counter data in multiple separate ring buffers.
 
+// Version v0.06c: 
+//  - Holdover Mode / Disciplined Mode commands implemented
+//    Note that in Holdover Mode the PWM DAC value can still be set manually using the SP command
+//  - Pressure Offset (PO) and Altitude Offset (AO) commands implemented
+//  - picDIV synchronization control and AP (arm picDIV) command
+//  - Reading TIC measuring phase difference between GPS PPS and picDIV PPS and discharge capacitor
+//  - STM32F401CCU6 Black Pill (lower cost version with less RAM and flash) now fully supported
+//  - TM1637 clock module can show UTC or local time. Local time to UTC time offset can be configured using TO command.
+
 // TODO
-// 1. picDIV synchronization control.
-// 2. Reading and clearing TIC measuring phase difference between GPS PPS and picDIV PPS.
-// 3. Refactor the entire program to make it easier to understand and maintain.
-// 4. Implement support for the STM32F401CCU6 Black Pill.
-// 5. Frequency / period meter implementation.
-// 6. Improve layout of ST7789 display.
+// 1. Refactor the entire program to make it easier to understand and maintain.
+// 2. Frequency / period meter implementation.
+// 3. Improve layout and refresh speed of ST7789 display.
+// 4. Implement hybrid PLL/FLL control loop algorithm and < 100ns UTC PPS sync.
+// 5. Implement very long period frequency data collection with 10s sampling.
+// 6. Investigate weighed/exponential averaging.
+// 7. Investigate PI or PID control loop algorithms.
 
 #define Program_Name "GPSDO"
-#define Program_Version "v0.06b"
+#define Program_Version "v0.06c"
 #define Author_Name "André Balsa"
-#define Contributors "Angelo Iannello"
+#define Contributors "Angelo Iannelli"
 
 // Debug options
 // -------------
@@ -149,15 +103,14 @@
 // Algorithmic options
 // -------------
 // #define GPSDO_PLL             // enable PLL control loop (requires PICDIV and TIC)
-#define GPSDO_OFFSET          // testing: use 8-bit frequency offset data instead of 64-bit counter values
 
 // Hardware options
 // ----------------
 // #define GPSDO_STM32F401       // use an STM32F401 Black Pill instead of STM32F411 (reduced RAM)
-                                 // IMPORTANT! Don't forget to select the correct board in the Tools->Board menu in the arduino IDE
+                                 // IMPORTANT! Don't forget to select the correct board in the "Tools"->"Board Part Number" menu in the Arduino IDE
 #define GPSDO_OLED            // SSD1306 128x64 I2C OLED display
 // #define GPSDO_LCD_ST7735      // ST7735 160x128 SPI LCD display
-#define GPSDO_LCD_ST7789      // ST7789 240x240 SPI LCD display (testing)
+// #define GPSDO_LCD_ST7789      // ST7789 240x240 SPI LCD display (testing)
 #define GPSDO_PWM_DAC         // STM32 16-bit PWM DAC, requires two rc filters (2xr=20k, 2xc=10uF) - always enable this!
 #define GPSDO_AHT10           // AHT10 or AHT20 (recommended) I2C temperature and humidity sensor
 #define GPSDO_GEN_2kHz_PB5    // generate 2kHz square wave test signal on pin PB5 using Timer 3
@@ -167,13 +120,12 @@
 // #define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
 #define GPSDO_VCC             // Vcc (nominal 5V) ; reading Vcc requires 1:2 voltage divider to PA0
 #define GPSDO_VDD             // Vdd (nominal 3.3V) reads VREF internal ADC channel
-#define GPSDO_CALIBRATION     // auto-calibration is enabled
 #define GPSDO_UBX_CONFIG      // optimize u-blox GPS receiver configuration
-// #define GPSDO_VERBOSE_NMEA    // GPS module NMEA stream echoed to USB serial xor Bluetooth serial
-// #define GPSDO_PICDIV          // generate a 1.2s synchronization pulse for the picDIV
+#define GPSDO_VERBOSE_NMEA    // GPS module NMEA stream echoed to USB serial xor Bluetooth serial
+#define GPSDO_PICDIV          // generate a 1.2s arming pulse for the picDIV
 #define GPSDO_TM1637          // TM1637 4-digit LED module
-// #define GPSDO_TIC            // read TIC 12-bit value on PA1 (ADC channel 1), then discharge capacitor using PB2
-// #define GPSDO_EEPROM            // enable STM32 buffered EEPROM emulation library
+#define GPSDO_LTIC            // read Lars' TIC Vphase 12-bit value on PA1 (ADC channel 1), then discharge TIC capacitor
+#define GPSDO_EEPROM          // enable STM32 buffered EEPROM emulation library
 
 // Includes
 // --------
@@ -195,12 +147,22 @@ uint64_t report_line_no = 0;            // line number for tab delimited reporti
 const uint16_t waitFixTime = 1;         // Maximum time in seconds waiting for a fix before reporting no fix / yes fix
                                         // Tested values 1 second and 5 seconds, 1s recommended
 
-#include <movingAvg.h>                  // https://github.com/JChristensen/movingAvg , needs simple patch
-                                        // to avoid warning message during compilation
+#include <movingAvg.h>                  // https://github.com/JChristensen/movingAvg
 
+// picDIV support
 #ifdef GPSDO_PICDIV
-  #define picDIVsyncPin PB3               // digital output pin used to generate a 1.2s synchronization pulse for the picDIV
+  #define picDIVarmPin PB3               // digital output pin used to generate a 1.1s arming (low) pulse for the picDIV
+  #define picdivArmDelay 1001            // low pulse width = time in ms required to arm picDIV, 1001ms
+  bool must_arm_picDIV = false;          // indicates picDIV must be armed waiting to sync on next PPS from GPS module
+  uint64_t arming_started = 0;           // millis() value when the picDIV was armed
 #endif // PICDIV
+
+#ifdef GPSDO_LTIC
+  #define VphaseInputPin PA1              // ADC pin to read Vphase from Lars' TIC, also used to discharge 1nF capacitor
+  #define DischargeTime 1                 // time in ms required to discharge 1nF capacitor - in principle with 330R resistor, 1 ms is more than enough time
+  volatile bool must_read_Vphase = false; // flag indicating PPS has occurred (set by Timer2_Capture_ISR, cleared when we read Vphase)
+  int adcVphase = 0;                      // 12-bit ADC value reading VPhaseInputPin
+#endif // LTIC  
 
 #ifdef GPSDO_GEN_2kHz_PB5
   #define Test2kHzOutputPin PB5           // digital output pin used to output a test 2kHz square wave
@@ -213,11 +175,12 @@ const uint16_t waitFixTime = 1;         // Maximum time in seconds waiting for a
   #define BT_BAUD 57600                            // Bluetooth baud rate
 #endif // BLUETOOTH
 
-// EEPROM emulation in flash
+// EEPROM emulation in flash - note this allocates flash_page_size bytes in RAM for buffer (16kB on STM32F411CEU6)
 #ifdef GPSDO_EEPROM
   #include <EEPROM.h>                              // Buffered EEPROM emulation library
-  char signature[6] = "STM32";
-  bool sigalreadywritten = true;                   // if true, means we have saved the PWM DAC value
+  char signature[6] = "GPSDO";
+  bool sigalreadywritten = false;                  // checked every power on, if true, means we have previously saved the PWM DAC value
+  uint16_t eeprom_page_size = 1024;                // actually 16k for STM32F411CEU6, but we are not going to use all that
 #endif // EEPROM
 
 #include <SerialCommands.h>                        // Commands parser library
@@ -251,6 +214,8 @@ TinyGPSPlus gps;                                   // create the TinyGPS++ objec
 // TM1637 4-digit LED module
 #ifdef GPSDO_TM1637
   #include <TM1637Display.h>                      // get library here > https://github.com/avishorp/TM1637
+  bool showlocaltime = true;                      // show local time if true, UTC time if false
+  int8_t timeoffset = 2;                          // UTC to local time offset, only used for TM1637 clock!
   // Module connection pins (Digital Pins)
   #define CLK PA8                                 // interface to TM1637 requires two GPIO pins
   #define DIO PB4
@@ -310,7 +275,7 @@ const uint16_t default_PWM_output = 35585; // "ideal" 16-bit PWM value, varies w
                                            // 35585 for a second NDK ENE3311B
 uint16_t adjusted_PWM_output;              // we adjust this value to "close the loop" of the DFLL when using the PWM
 volatile bool must_adjust_DAC = false;     // true when there is enough data to adjust Vctl
-char trendstr[5] = " ___";                 // PWM trend string, set in the adjustVctlPWM() function
+char trendstr[5] = " ___";            // PWM trend string, set in the adjustVctlPWM() function
 
 #define VctlPWMOutputPin PB9          // digital output pin used to output a PWM value, TIM4 ch4
                                       // Two cascaded RC filters transform the PWM into an analog DC value
@@ -330,6 +295,11 @@ volatile int pwmVctl = 0;             // variable used to store PWM Vctl read by
 
 // movingAvg objects for the voltages measured by MCU ADC
 // all averages over 10 samples (10 seconds in principle)
+#ifdef GPSDO_LTIC
+  movingAvg avg_adcVphase(10);
+  int16_t avgVphase = 0;
+#endif // LTIC
+
 #ifdef GPSDO_VDD
   movingAvg avg_adcVdd(10);
   int16_t avgVdd = 0;
@@ -359,8 +329,9 @@ int16_t avgpwmVctl = 0;
 #endif // BMP280_I2C
 
 #if (defined (GPSDO_BMP280_SPI) || defined (GPSDO_BMP280_I2C))
-  const uint16_t PressureOffset = 1860;  // that offset must be calculated for your sensor and location
-  float bmp280temp=0.0, bmp280pres=0.0, bmp280alti=0.0; // read sensor, save here
+  float PressureOffset = 1230.0;  // that offset must be calculated for your sensor and local atmospheric pressure
+  float AltitudeOffset = 1000.0;  // that offset must be calculates for your sensor and local altitude
+  float bmp280temp=0.0, bmp280pres=0.0, bmp280alti=0.0; // read sensor, save values here
 #endif // BMP280
 
 // LEDs
@@ -391,29 +362,23 @@ char uptimestr[9] = "00:00:00";    // uptime string
 char updaysstr[5] = "000d";        // updays string
 
 // OCXO frequency measurement
+// Uses 8-bit frequency offset data instead of 64-bit counter values
+// Uses a single "unified" circular buffer holding 20000 seconds of 1-byte offsets, so uses 20000 bytes of RAM
 
-#ifdef GPSDO_OFFSET                     // testing: use 8-bit frequency offset data instead of 64-bit counter values
-  volatile int8_t instant_offset = 0;   // last measured frequency offset from 10MHz (measured frequency - 10^7)
-  volatile int8_t circbuf_offset[1000]; // 1000 seconds unified circular buffer for offsets - note the index range is 0-999      
-  volatile int16_t cumulten_offset = 0; // cumulative offset over the last 10 seconds (used to calculate frequency average over last 10 seconds)
-  volatile int16_t cumulhun_offset = 0; // cumulative offset over the last 100 seconds (used to calculate frequency average over last 100 seconds)
-  volatile int16_t cumultho_offset = 0; // cumulative offset over the last 1000 seconds (used to calculate frequency average over last 1000 seconds)
-  volatile uint32_t coffset_newest = 0; // newest index for offset ring buffer, varies from 0 to 999
-  volatile bool coten_full = false;     // flag set when buffer has filled up with 10s of data
-  volatile bool cohun_full = false;     // flag set when buffer has filled up with 100s of data
-  volatile bool cotho_full = false;     // flag set when buffer has filled up with 1000s of data
-  volatile double oavgften=0, oavgfhun=0, oavgftho=0; // average frequency calculated from cumulative offset, for respective length of time                    
-#endif // OFFSET
-
-// special 10s sampling rate data structures (work in progress)
-volatile uint16_t esamplingfactor = 10; // sample 64-bit counter every 10 seconds
-volatile uint16_t esamplingcounter = 0; // counter from 0 to esamplingfactor
-volatile bool esamplingflag = false;
-
-volatile uint64_t circbuf_esten64[11];    // 10+1 x10 seconds circular buffer, so 100 seconds
-volatile uint32_t cbihes_newest = 0;      // newest/oldest index
-volatile bool cbHes_full = false;         // flag set when buffer has filled up
-volatile double avgesample = 0;           // 100 seconds average with 10s sampling rate
+volatile int8_t instant_offset = 0;   // last measured frequency offset from 10MHz (measured frequency - 10^7)
+volatile int8_t circbuf_offset[20000]; // 20000 seconds unified circular buffer for offsets - note the index range is 0-19999      
+volatile int16_t cumulten_offset = 0; // cumulative offset over the last 10 seconds (used to calculate frequency average over last 10 seconds)
+volatile int16_t cumulhun_offset = 0; // cumulative offset over the last 100 seconds (used to calculate frequency average over last 100 seconds)
+volatile int16_t cumultho_offset = 0; // cumulative offset over the last 1000 seconds (used to calculate frequency average over last 1000 seconds)
+volatile int16_t cumultth_offset = 0; // cumulative offset over the last 10000 seconds (used to calculate frequency average over last 10000 seconds)
+volatile int16_t cumul20k_offset = 0; // cumulative offset over the last 20000 seconds (used to calculate frequency average over last 20000 seconds)
+volatile uint32_t coffset_newest = 0; // newest index for offset ring buffer, varies from 0 to 19999
+volatile bool coten_full = false;     // flag set when buffer has filled up with 10s of data
+volatile bool cohun_full = false;     // flag set when buffer has filled up with 100s of data
+volatile bool cotho_full = false;     // flag set when buffer has filled up with 1000s of data
+volatile bool cotth_full = false;     // flag set when buffer has filled up with 10000s of data
+volatile bool co20k_full = false;     // flag set when buffer has filled up with 20000s of data
+volatile double oavgften=0, oavgfhun=0, oavgftho=0, oavgftth=0, oavgf20k=0; // average frequency calculated from cumulative offset, for respective length of time                    
 
 // other OCXO frequency measurement data structures
 const uint32_t basefreq=10000000;        // OCXO nominal frequency in Hz
@@ -423,14 +388,7 @@ volatile uint32_t lsfcount=0, previousfcount=0, calcfreqint=basefreq;
 const uint32_t lowerfcount = 9999500;
 const uint32_t upperfcount = 10000500;
 
-/* Moving average frequency variables
-   Basically we store the counter captures for 10 and 100 seconds.
-   When the buffers are full, the average frequency is quite simply
-   the difference between the oldest and newest data divided by the size
-   of the buffer.
-   Each second, when the buffers are full, we overwrite the oldest data
-   with the newest data and calculate each average frequency.
- */
+// Other frequency measurement variables
 volatile uint64_t fcount64=0, prevfcount64=0, calcfreq64=basefreq; 
 // ATTENTION! must declare 64-bit, not 32-bit variable, because of shift
 volatile uint64_t tim2overflowcounter = 0;  // testing, counts the number of times TIM2 overflows
@@ -438,32 +396,14 @@ volatile bool overflowflag = false;         // flag set by the overflow ISR, res
 volatile bool captureflag = false;          // flag set by the capture ISR, reset by the 2Hz ISR
 volatile bool overflowErrorFlag = false;    // flag set if there was an overflow processing error
 
-volatile uint64_t circbuf_ten64[11]; // 10+1 seconds circular buffer
-volatile uint64_t circbuf_hun64[101]; // 100+1 seconds circular buffer
-volatile uint64_t circbuf_tho64[1001]; // 1,000+1 seconds circular buffer
-#ifndef GPSDO_STM32F401
-volatile uint64_t circbuf_tth64[10001]; // 10,000 + 1 seconds circular buffer
-#else // STM32F401 has less RAM
-volatile uint64_t circbuf_fth64[5001];  // 5,000 + 1 seconds circular buffer
-#endif // GPSDO_STM32F401
-
-volatile uint32_t cbiten_newest=0; // index to oldest, newest data
-volatile uint32_t cbihun_newest=0;
-volatile uint32_t cbitho_newest=0;
-volatile uint32_t cbitth_newest=0;
-
-volatile bool cbTen_full=false, cbHun_full=false, cbTho_full=false, cbTth_full=false;  // flag when buffer full
-volatile double avgften=0, avgfhun=0, avgftho=0, avgftth=0; // average frequency calculated once the buffer is full
 volatile bool flush_ring_buffers_flag = true;  // indicates ring buffers should be flushed
 
 // Miscellaneous data structures
 
-// picDIV support
-#ifdef GPSDO_PICDIV
-  #define VphaseInputPin PB1                    // ADC pin to read Vphase from 1ns-resolution TIC
-  volatile bool force_armpicDIV_flag = true;    // indicates picDIV must be armed waiting to sync on next PPS from GPS module
-#endif // PICDIV
+//holdover mode / disciplined mode switch
+bool holdover_mode = false;                     // always start in disciplined mode
 
+// calibration
 volatile bool force_calibration_flag = true;   // indicates GPSDO should start calibration sequence
 
 volatile bool ocxo_needs_warming = true;       // indicates OCXO needs to warm up a few minutes after power on
@@ -489,26 +429,106 @@ volatile bool tunnel_mode_flag = false;        // the GPSDO relays the informati
 // This is the default handler, and gets called when no other command matches. 
 void cmd_unrecognized(SerialCommands* sender, const char* cmd)
 {
-  sender->GetSerial()->print("Unrecognized command [");
+  sender->GetSerial()->print(F("Unrecognized command <"));
   sender->GetSerial()->print(cmd);
-  sender->GetSerial()->println("]");
+  sender->GetSerial()->println(F(">"));
+  sender->GetSerial()->println(F("Type <H> for list of valid commands"));
 }
 
 // called for V (version) command
 void cmd_version(SerialCommands* sender)
 {
-  sender->GetSerial()->print(Program_Name);
-  sender->GetSerial()->print(" - ");
-  sender->GetSerial()->print(Program_Version);
-  sender->GetSerial()->print(" by ");
-  sender->GetSerial()->println(Author_Name);
+  sender->GetSerial()->print(F(Program_Name));
+  sender->GetSerial()->print(F(" - "));
+  sender->GetSerial()->print(F(Program_Version));
+  sender->GetSerial()->print(F(" by "));
+  sender->GetSerial()->println(F(Author_Name));
 }
+
+#if (defined (GPSDO_BMP280_SPI) || defined (GPSDO_BMP280_I2C))
+  // called for PO (Pressure Offset) command
+  void cmd_pressoffset(SerialCommands* sender)
+  {
+    float po;
+    char* po_str = sender->Next();
+    if (po_str == NULL) { // if no value was specified, reports current value
+      sender->GetSerial()->print(F("No Pressure Offset value specified, current value is "));
+      sender->GetSerial()->println(PressureOffset, 2);
+    }
+    else // check the value that was specified
+    {
+      po = atof(po_str); // note atof() returns zero if it cannot convert the string to a valid integer
+      if (((po >= 1) && (po <= 3000)) || ((po <= -1) && (po >= -3000))) // check if the value specified is not zero and reasonable
+      {
+        sender->GetSerial()->print(F("Setting Pressure Offset value ")); // if yes, set the value
+        sender->GetSerial()->println(po, 2);
+        PressureOffset = po;
+      }
+      else // incorrect value specified, print error message
+      {
+        sender->GetSerial()->println(F("Specified Pressure Offset invalid, leaving unchanged"));  
+      }  
+    }
+  }
+  
+  // called for AO (Altitude Offset) command
+  void cmd_altitoffset(SerialCommands* sender)
+  {
+    float ao;
+    char* ao_str = sender->Next();
+    if (ao_str == NULL) { // if no value was specified, reports current value
+      sender->GetSerial()->print(F("No Altitude Offset value specified, current value is "));
+      sender->GetSerial()->println(AltitudeOffset, 2);
+    }
+    else // check the value that was specified
+    {
+      ao = atof(ao_str); // note atoi() returns zero if it cannot convert the string to a valid integer
+      if (((ao >= 1) && (ao <= 3000)) || ((ao <= -1) && (ao >= -3000))) // check if the value specified is not zero and reasonable
+      {
+        sender->GetSerial()->print(F("Setting Altitude Offset value ")); // if yes, set the value
+        sender->GetSerial()->println(ao, 2);
+        AltitudeOffset = ao;
+      }
+      else // incorrect value specified, print error message
+      {
+        sender->GetSerial()->println(F("Specified Altitude Offset invalid, leaving unchanged"));  
+      }  
+    }
+  }
+#endif // BMP280
+
+#ifdef GPSDO_TM1637
+  // called for TO (UTC to local Time Offset) command
+  void cmd_lcltimeoffset(SerialCommands* sender)
+  {
+    int to;
+    char* to_str = sender->Next();
+    if (to_str == NULL) { // if no value was specified, reports current value
+      sender->GetSerial()->print(F("No UTC to local Time Offset value specified, current value is "));
+      sender->GetSerial()->println(timeoffset);
+    }
+    else // check the value that was specified
+    {
+      to = atoi(to_str); // note atoi() returns zero if it cannot convert the string to a valid integer
+      if ((to <= 23) && (to >= -23))  // check if the value specified is within bounds
+      {
+        sender->GetSerial()->print(F("Setting UTC to local Time Offset value ")); // if yes, set the value
+        sender->GetSerial()->println(to);
+        timeoffset = to;
+      }
+      else // incorrect value specified, print error message
+      {
+        sender->GetSerial()->println(F("Specified UTC to local Time Offset invalid, leaving unchanged"));  
+      }  
+    }
+  }
+#endif // TM1637
 
 // called for RD (Report tab Delimited format) command
 void cmd_repdel(SerialCommands* sender)
 {
   report_tab_delimited = true;  // set switch
-  sender->GetSerial()->println("Switching to reporting in Tab Delimited Format");
+  sender->GetSerial()->println(F("Switching to reporting in Tab Delimited Format"));
 }
 
 // called for RH (Report Human readable format) command
@@ -516,28 +536,51 @@ void cmd_rephum(SerialCommands* sender)
 {
   report_tab_delimited = false;  // reset switch
   report_line_no = 0;            // reset line counter
-  sender->GetSerial()->println("Switching to reporting in Human Readable Format");
+  sender->GetSerial()->println(F("Switching to reporting in Human Readable Format"));
+}
+
+// called for MD (Mode Disciplined) command
+void cmd_modedisc(SerialCommands* sender)
+{
+  holdover_mode = false;  // set operating mode disciplined
+  sender->GetSerial()->println(F("Switching to Disciplined Mode"));
+}
+
+// called for MH (Mode Holdover) command
+void cmd_modehold(SerialCommands* sender)
+{
+  holdover_mode = true;  // set operating mode holdover
+  sender->GetSerial()->println(F("Switching to Holdover Mode"));
 }
 
 // called for F (flush ring buffers) command
 void cmd_flush(SerialCommands* sender)
 {
   flush_ring_buffers_flag = true;  // ring buffers will be flushed inside interrupt routine
-  sender->GetSerial()->println("Ring buffers flushed");
+  sender->GetSerial()->println(F("Ring buffers flushed"));
 }
+
+#ifdef GPSDO_PICDIV
+  // called for AP (arm picDIV) command
+  void cmd_armpicdiv(SerialCommands* sender)
+  {
+    must_arm_picDIV = true;  // request arming picDIV
+    sender->GetSerial()->println(F("Arming picDIV, synchronization will take place at next PPS pulse from GPS receiver"));
+  }
+#endif // PICDIV
 
 // called for C (calibration) command
 void cmd_calibrate(SerialCommands* sender)
 {
   force_calibration_flag = true;  // starts auto-calibration sequence
-  sender->GetSerial()->println("Auto-calibration sequence started");
+  sender->GetSerial()->println(F("Auto-calibration sequence started"));
 }
 
 // called for T (tunnel) command
 void cmd_tunnel(SerialCommands* sender)
 {
   tunnel_mode_flag = true;  // switches GPSDO operation to tunnel mode
-  sender->GetSerial()->println("Switching to USB Serial <-> GPS tunnel mode");
+  sender->GetSerial()->println(F("Switching to USB Serial <-> GPS tunnel mode"));
 }
 
 // called for SP (set PWM) command
@@ -547,7 +590,7 @@ void cmd_setPWM(SerialCommands* sender)
   char* pwm_str = sender->Next();
   if (pwm_str == NULL) // check if a value was specified
   {
-    sender->GetSerial()->println("No PWM value specified, using default");
+    sender->GetSerial()->println(F("No PWM value specified, using default"));
     pwm = default_PWM_output;
     adjusted_PWM_output = pwm;
     analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
@@ -557,14 +600,14 @@ void cmd_setPWM(SerialCommands* sender)
     pwm = atoi(pwm_str); // note atoi() returns zero if it cannot convert the string to a valid integer
     if ((pwm >= 1) && (pwm <= 65535)) // check if the value specified is positive 16-bit integer
     {
-      sender->GetSerial()->print("Setting PWM value "); // if yes, set the value
+      sender->GetSerial()->print(F("Setting PWM value ")); // if yes, set the value
       sender->GetSerial()->println(pwm);
       adjusted_PWM_output = pwm;
       analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
     }
     else // incorrect value specified, print error message
     {
-      sender->GetSerial()->println("PWM value must be positive integer between 1 and 65535, leaving unchanged");  
+      sender->GetSerial()->println(F("PWM value must be positive integer between 1 and 65535, leaving unchanged"));  
     }  
   }
 }
@@ -576,62 +619,127 @@ void cmd_up1(SerialCommands* sender)
 {
   adjusted_PWM_output = adjusted_PWM_output + 1;
   analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
-  sender->GetSerial()->println("increased PWM 1 bit");
+  sender->GetSerial()->println(F("increased PWM 1 bit"));
 }
 // called for up10 (increase PWM 10 bits) command
 void cmd_up10(SerialCommands* sender)
 {
   adjusted_PWM_output = adjusted_PWM_output + 10;
   analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
-  sender->GetSerial()->println("increased PWM 10 bits");
+  sender->GetSerial()->println(F("increased PWM 10 bits"));
 }
 // called for dp1 (decrease PWM 1 bit) command
 void cmd_dp1(SerialCommands* sender)
 {
   adjusted_PWM_output = adjusted_PWM_output - 1;
   analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
-  sender->GetSerial()->println("decreased PWM 1 bit");
+  sender->GetSerial()->println(F("decreased PWM 1 bit"));
 }
 // called for dp10 (decrease PWM 10 bits) command
 void cmd_dp10(SerialCommands* sender)
 {
   adjusted_PWM_output = adjusted_PWM_output - 10;
   analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
-  sender->GetSerial()->println("decreased PWM 10 bits");
+  sender->GetSerial()->println(F("decreased PWM 10 bits"));
 }
 
 #ifdef GPSDO_EEPROM
 // called for ES (EEPROM Save) command
 void cmd_eepromsave(SerialCommands* sender)
 {
-  // save something in EEPROM
-  sender->GetSerial()->println("Please wait, saving to EEPROM");
+  // write signature and PWM DAC value to EEPROM
+  sender->GetSerial()->println(F("Please wait, saving PWM DAC value to EEPROM - ring buffer will be flushed"));
+  // write signature, byte by byte
+  for (uint16_t i = 0; i < 6; i++) {
+      eeprom_buffered_write_byte(i, signature[i]);  // write signature to buffer
+  }
+  // write PWM DAC value to buffer
+  eeprom_buffered_write_byte(6, highByte(adjusted_PWM_output)); // high byte to buffer
+  eeprom_buffered_write_byte(7, lowByte(adjusted_PWM_output));  // low byte to buffer
+  // Copy the data from the buffer to the flash
+  eeprom_buffer_flush();  // note this is a long operation (up to 500ms)
+  // now read back flash into buffer and check that writing was successful
+  sigalreadywritten = true;
+  // flush ring buffers
+  flush_ring_buffers_flag = true;
 }
 
 // called for ER (EEPROM Recall) command
 void cmd_eepromrecall(SerialCommands* sender)
 {
-  // recall something from EEPROM
-  sender->GetSerial()->println("Reading from EEPROM");
+  // first check that flash is really signed
+  sigalreadywritten = true;
+  eeprom_buffer_fill(); // fill the buffer with contents of Flash emulating EEPROM
+  for (uint8_t csig = 0; csig < 6; csig++) {
+    if (eeprom_buffered_read_byte(csig) != signature[csig]) sigalreadywritten = false;
+  }
+  // recall PWM DAC value from EEPROM
+  if (sigalreadywritten) {
+    sender->GetSerial()->println(F("Reading PWM DAC value from EEPROM"));
+    adjusted_PWM_output = (256 * eeprom_buffered_read_byte(6)) + eeprom_buffered_read_byte(7);  // saved PWM value
+    analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
+  }
+  else sender->GetSerial()->println(F("EEPROM does not have valid signature, cannot read PWM DAC value"));
 }
 
 // called for EE (EEPROM Erase) command
 void cmd_eepromerase(SerialCommands* sender)
 {
   // erase EEPROM
-  sender->GetSerial()->println("Please wait, erasing EEPROM");
+  sender->GetSerial()->println(F("Please wait, erasing EEPROM - ring buffer will be flushed"));
+  // Fill the buffer in memory with 0 to 255
+  for (uint16_t i = 0; i < eeprom_page_size; i++) {
+    eeprom_buffered_write_byte(i, i % 256);
+  }
+  // Copy the data from the buffer to the flash
+  eeprom_buffer_flush();  // note this is a long operation (up to 500ms)
+  sigalreadywritten = false;
+  // flush ring buffers
+  flush_ring_buffers_flag = true;
 }
 #endif // EEPROM
 
+// called for H (Help) command
+void cmd_help(SerialCommands* sender)
+{
+  sender->GetSerial()->print(F(Program_Name));
+  sender->GetSerial()->print(F(" - "));
+  sender->GetSerial()->print(F(Program_Version));
+  sender->GetSerial()->print(F(" by "));
+  sender->GetSerial()->println(F(Author_Name));
+  sender->GetSerial()->println(F("Commands implemented:"));
+  sender->GetSerial()->println(F("\t- V : returns program name, version and author"));
+  sender->GetSerial()->println(F("\t- H : list all the commands and their parameters if any"));
+  sender->GetSerial()->println(F("\t- F : flush ring buffers"));
+  sender->GetSerial()->println(F("\t- C : calibrate OCXO"));
+  sender->GetSerial()->println(F("\t- dp/up 1/10 : adjust Vctl down/up PWM fine/coarse, example dp1 means decrease PWM by 1"));
+  sender->GetSerial()->println(F("\t- SP <number> : set PWM to value between 1 and 65535"));
+  sender->GetSerial()->println(F("\t- RD/RH : toggle between tab Delimited and Human readable GPSDO status reporting"));
+  sender->GetSerial()->println(F("\t- ES/ER/EE : EEPROM Save, EEPROM Recall, EEPROM Erase"));
+  sender->GetSerial()->println(F("\t- MH/MD : Mode Holdover (OCXO is not \"disciplined\" by GPS), Mode Disciplined"));
+  sender->GetSerial()->println(F("\t- PO <float value> : Pressure Offset - calibrate atmospheric pressure and altitude sensor"));
+  sender->GetSerial()->println(F("\t- AO <float value> : Altitude Offset - calibrate atmospheric pressure and altitude sensor"));
+  sender->GetSerial()->println(F("\t- AP : arm and sync picDIV"));
+  sender->GetSerial()->println(F("\t- TO <number>: set UTC to local time offset, between -23 and 23 (only for TM1637 clock display)"));
+  sender->GetSerial()->println(F("\t"));
+}
+    
 // SerialCommand commands
 // Note: Commands are case sensitive
-SerialCommand cmd_version_("V", cmd_version);     // print program name and version
-SerialCommand cmd_flush_("F", cmd_flush);         // flush ring buffers
-SerialCommand cmd_calibrate_("C", cmd_calibrate); // force calibration
-SerialCommand cmd_tunnel_("T", cmd_tunnel);       // activate tunnel mode
-SerialCommand cmd_rephum_("RH", cmd_rephum);      // activate humand readable reporting
-SerialCommand cmd_repdel_("RD", cmd_repdel);      // activate tab delimited reporting
-SerialCommand cmd_setPWM_("SP", cmd_setPWM);      // note this command takes a 16-bit PWM value (1 to 65535) as an argument
+SerialCommand cmd_version_("V", cmd_version);      // print program name and version
+SerialCommand cmd_flush_("F", cmd_flush);          // flush ring buffers
+SerialCommand cmd_help_("H", cmd_help);            // print list of commands
+SerialCommand cmd_calibrate_("C", cmd_calibrate);  // force calibration
+#ifdef GPSDO_PICDIV
+  SerialCommand cmd_armpicdiv_("AP", cmd_armpicdiv); // arm and sync picDIV
+#endif // PICDIV
+SerialCommand cmd_tunnel_("T", cmd_tunnel);        // activate tunnel mode
+SerialCommand cmd_rephum_("RH", cmd_rephum);       // activate humand readable reporting
+SerialCommand cmd_repdel_("RD", cmd_repdel);       // activate tab delimited reporting
+SerialCommand cmd_modehold_("MH", cmd_modehold);   // switch to holdover mode
+SerialCommand cmd_modedisc_("MD", cmd_modedisc);   // switch to disciplined mode
+SerialCommand cmd_setPWM_("SP", cmd_setPWM);       // note this command takes a 16-bit PWM value (1 to 65535) as an argument
+
 // 16-bit PWM commands
 SerialCommand cmd_up1_("up1", cmd_up1);
 SerialCommand cmd_up10_("up10", cmd_up10);
@@ -643,6 +751,15 @@ SerialCommand cmd_dp10_("dp10", cmd_dp10);
   SerialCommand cmd_eepromrecall_("ER", cmd_eepromrecall);
   SerialCommand cmd_eepromerase_("EE", cmd_eepromerase);
 #endif // EEPROM
+
+#if (defined (GPSDO_BMP280_SPI) || defined (GPSDO_BMP280_I2C))
+  SerialCommand cmd_pressoffset_("PO", cmd_pressoffset);  // set new Pressure Offset value
+  SerialCommand cmd_altitoffset_("AO", cmd_altitoffset);  // set new Altitude Offset value
+#endif // BMP280
+
+#ifdef GPSDO_TM1637
+  SerialCommand cmd_lcltimeoffset_("TO", cmd_lcltimeoffset);  // set UTC to local Time Offset value
+#endif // TM1637
 
 // loglevel
 uint8_t loglevel = 7;   // see commands comments for log level definitions, default is 7
@@ -657,9 +774,12 @@ void Timer2_Overflow_ISR(void)
 }
 
 // Interrupt Service Routine for TIM2 counter capture
-void Timer2_Capture_ISR(void)
+void Timer2_Capture_ISR(void) // WARNING! Do not attempt reading an ADC channel inside the ISR
 {
   captureflag = true;
+  #ifdef GPSDO_LTIC
+    must_read_Vphase = true;  // PPS just occurred so Vphase can be read
+  #endif // LTIC
 }
 
 // Interrupt Service Routine for the 2Hz timer
@@ -671,16 +791,14 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
   halfsecond = !halfsecond; // true @ 1Hz
 
   // read TIM2->CCR3 once per second (when captureflag is set) and if it has changed, calculate OCXO frequency
-
   if (captureflag) {
     lsfcount = TIM2->CCR3; // read TIM2->CCR3
     captureflag = false;   // clear capture flag
-    if (flush_ring_buffers_flag) 
-    {
+    if (flush_ring_buffers_flag) {
       flushringbuffers();   // flush ring buffers after a sat fix loss
     }
-    else // check if the frequency counter has been updated and process accordingly
-    { 
+    else {
+      // check if the frequency counter has been updated and process accordingly
       // there are two possible cases
       // 1. lsfcount is the same as last time -> there is nothing to do, or
       // 2. lsfcount is NOT the same as last time -> process
@@ -699,22 +817,20 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
         fcount64 = (tim2overflowcounter << 32) + lsfcount; // hehe now we have a 64-bit counter
         if (fcount64 > prevfcount64) {  // if we have a new count - that happens once per second
          if (((fcount64 - prevfcount64) > lowerfcount) && ((fcount64 - prevfcount64) < upperfcount)) { // if we have a valid fcount, otherwise it's discarded
-          logfcount64();  // save fcount in the 64-bit ring buffers
-          calcfreq64 = fcount64 - prevfcount64; // the difference is exactly the OCXO frequency in Hz
+           
+           calcfreq64 = fcount64 - prevfcount64;     // the difference is exactly the OCXO frequency in Hz
           
-          #ifdef GPSDO_OFFSET                         // testing: use 8-bit frequency offset data instead of 64-bit counter values
-            instant_offset = calcfreq64 - basefreq;   // last measured frequency offset from 10MHz = measured frequency - 10^7
-            logfreqoffset();                          // save frequency offset in 8-bit unified ring buffer
-          #endif // OFFSET
-          
+           instant_offset = calcfreq64 - basefreq;   // last measured frequency offset from 10MHz = measured frequency - 10^7
+           logfreqoffset();                          // save frequency offset in 8-bit unified ring buffer
          }
         prevfcount64 = fcount64;
         }
       }
       previousfcount = lsfcount; // this happens whether it has changed or not
     }                         
-  }
+  } // done capture flag
   
+  // yellow LED handling
   switch (yellow_led_state)
   {
     case 0:
@@ -733,7 +849,7 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
       // default is to turn off led
       digitalWrite(yellowledpin, LOW);
       break; 
-  }
+  } // done yellow LED
   
   // Uptime clock - in days, hours, minutes, seconds
   if (halfsecond)
@@ -751,18 +867,18 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
               }
           }
       }
-  }  
+  } // done updating uptime clock
+ 
 } // end of Timer_ISR_2Hz()
 
-#ifdef GPSDO_OFFSET          // testing: use 8-bit frequency offset data instead of 64-bit counter values
-  void logfreqoffset() {
+void logfreqoffset() {
     // we need to:
     // 1. log the instantaneous frequency offset into the unified ring buffer
     // 2. update the respective cumulative offsets
     // 3. detect when the unified ring buffer has filled with respectively 10s, 100s and 1000s of data,
     //    set the _full flags and handle wraparound
     int8_t temp_offset_save = 0;
-    if (cotho_full) temp_offset_save = circbuf_offset[coffset_newest]; // save this value in temporary variable
+    if (co20k_full) temp_offset_save = circbuf_offset[coffset_newest]; // save this value in temporary variable
     
     circbuf_offset[coffset_newest] = instant_offset; // log the instantaneous frequency offset into the unified ring buffer
      
@@ -775,15 +891,17 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
     cumulten_offset = cumulten_offset + instant_offset;
     cumulhun_offset = cumulhun_offset + instant_offset;
     cumultho_offset = cumultho_offset + instant_offset;
+    cumultth_offset = cumultth_offset + instant_offset;
+    cumul20k_offset = cumul20k_offset + instant_offset;
     
-    // we have to work out what is the index to our -10s, -100s or -1000s old offset data is and subtract it
+    // work out what is the index to our -10s, -100s or -1000s old offset data and subtract it
 
     if (coten_full) { // handle 10s case
       if (coffset_newest >= 10) {
         cumulten_offset = cumulten_offset - circbuf_offset[coffset_newest - 10];
       }
-      else { // coffset_newest < 10, so we have wrapped around, we have to add 1000 to our index
-        cumulten_offset = cumulten_offset - circbuf_offset[coffset_newest - 10 + 1000];
+      else { // coffset_newest < 10, so we have wrapped around, we have to add 20000 to our index
+        cumulten_offset = cumulten_offset - circbuf_offset[coffset_newest - 10 + 20000];
       }
     }
     
@@ -791,162 +909,84 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
       if (coffset_newest >= 100) {
         cumulhun_offset = cumulhun_offset - circbuf_offset[coffset_newest - 100];
       }
-      else { // coffset_newest < 100, so we have wrapped around, we have to add 1000 to our index
-        cumulhun_offset = cumulhun_offset - circbuf_offset[coffset_newest - 100 + 1000];
+      else { // coffset_newest < 100, so we have wrapped around, we have to add 20000 to our index
+        cumulhun_offset = cumulhun_offset - circbuf_offset[coffset_newest - 100 + 20000];
       }
     }
 
     if (cotho_full) { // handle 1000s case
-      // if cotho_full is true then we subtract the value we saved right at the beginning.
-      cumultho_offset = cumultho_offset - temp_offset_save;
+      if (coffset_newest >= 1000) {
+        cumultho_offset = cumultho_offset - circbuf_offset[coffset_newest - 1000];
+      }
+      else { // coffset_newest < 1000, so we have wrapped around, we have to add 20000 to our index
+        cumultho_offset = cumultho_offset - circbuf_offset[coffset_newest - 1000 + 20000];
+      }
+    }
+    
+    if (cotth_full) { // handle 10000s case
+      if (coffset_newest >= 10000) {
+        cumultth_offset = cumultth_offset - circbuf_offset[coffset_newest - 10000];
+      }
+      else { // coffset_newest < 10000, so we have wrapped around, we have to add 20000 to our index
+        cumultth_offset = cumultth_offset - circbuf_offset[coffset_newest - 10000 + 20000];
+      }
+    }
+
+    if (co20k_full) { // handle 20000s case
+      // if co20k_full is true then we subtract the value we saved right at the beginning.
+      cumul20k_offset = cumul20k_offset - temp_offset_save;
     }
     
     coffset_newest++;
     
-    // did we just fill our unified ring buffer with 10s or 100s or 1000s of data ?
-    if (coffset_newest == 10)  coten_full=true; // this only needs to happen once, when the unified ring buffer
-    if (coffset_newest == 100) cohun_full=true; // has filled with respectively 10s, 100s and 1000s of data
-    if (coffset_newest == 1000) {
-      cotho_full=true;
-      coffset_newest = 0;   // (wrap around)
+    // did we just fill our unified ring buffer with 10s or 100s or 1000s or 10000s or 20000s of data ?
+    if (coffset_newest == 10)  coten_full=true;   // this only needs to happen once, when the unified ring buffer
+    if (coffset_newest == 100) cohun_full=true;   // has filled with respectively 10s, 100s, 1000s, 10000s
+    if (coffset_newest == 1000)  cotho_full=true; // and 20000s of data
+    if (coffset_newest == 10000) cotth_full=true;
+    if (coffset_newest == 20000) {
+      co20k_full=true;
+      coffset_newest = 0;   // (wrap around) - remember coffset_newest is the index 0 to 19999
     }
-    
-    calcoavg(); // always recalculate averages after logging frequency offset (if the unified buffer has reached respective levels)
+    // averages recalculation moved to main loop in version v0.06c
+    // calcoavg(); // always recalculate averages after logging frequency offset (if the unified buffer has reached respective levels)
   
-  } // end of logfreqoffset()
-#endif // OFFSET
-  
-void logfcount64() { // called once per second from ISR to update all the ring buffers
+} // end of logfreqoffset()
 
-  // 10 seconds buffer
-  circbuf_ten64[cbiten_newest] = fcount64;
-  cbiten_newest++;
-  if (cbiten_newest > 10) {
-     cbTen_full=true; // this only needs to happen once, when the buffer fills up for the first time
-     cbiten_newest = 0;   // (wrap around)
-  }
-  // 100 seconds buffer
-  circbuf_hun64[cbihun_newest] = fcount64;
-  cbihun_newest++;
-  if (cbihun_newest > 100) {
-     cbHun_full=true; // this only needs to happen once, when the buffer fills up for the first time
-     cbihun_newest = 0;   // (wrap around)
-  }
-  // 1000 seconds buffer
-  circbuf_tho64[cbitho_newest] = fcount64;
-  cbitho_newest++;
-  if (cbitho_newest > 1000) {
-     cbTho_full=true; // this only needs to happen once, when the buffer fills up for the first time
-     cbitho_newest = 0;   // (wrap around)
-  }
-  // 10000 seconds buffer (2 hr 46 min 40 sec)
-  circbuf_tth64[cbitth_newest] = fcount64;
-  cbitth_newest++;
-  if (cbitth_newest > 10000) {
-     cbTth_full=true; // this only needs to happen once, when the buffer fills up for the first time
-     cbitth_newest = 0;   // (wrap around)
-  }
-
-  calcavg(); // always recalculate averages after logging fcount (if the respective buffers are full)
-
-} // end of logfcount64()
-
-#ifdef GPSDO_OFFSET // testing: use 8-bit frequency offset data instead of 64-bit counter values
-  void calcoavg() {
-    // here we need to calculate the frequency averages oavgften, oavgfhun, oavgftho from the respective cumulative offsets
-    // as seen below, this is pretty simple
-    if (coten_full) oavgften = double(basefreq) + (double(cumulten_offset) / 10.0);
-    if (cohun_full) oavgfhun = double(basefreq) + (double(cumulhun_offset) / 100.0);
-    if (cotho_full) oavgftho = double(basefreq) + (double(cumultho_offset) / 1000.0);
-  }
-#endif // OFFSET
-
-void calcavg() {
-  // Calculate the OCXO frequency to 1, 2, 3 or 4 decimal places only when the respective buffers are full
-  // Try to understand the algorithm for the 10s ring buffer first, the others work exactly the same
-
-  uint64_t latfcount64, oldfcount64; // latest fcount, oldest fcount stored in ring buffer
-  
-  if (cbTen_full) { // we want (latest fcount - oldest fcount) / 10
-    // latest fcount is always circbuf_ten64[cbiten_newest-1]
-    // except when cbiten_newest is zero
-    // oldest fcount is always circbuf_ten64[cbiten_newest] when buffer is full
-    if (cbiten_newest == 0) latfcount64 = circbuf_ten64[10];
-    else latfcount64 = circbuf_ten64[cbiten_newest-1];
-    oldfcount64 = circbuf_ten64[cbiten_newest];
-    // now that we have latfcount64 and oldfcount64 we can calculate the average frequency
-    avgften = double(latfcount64 - oldfcount64)/10.0;   
-  }  
-  if (cbHun_full) { // we want (latest fcount - oldest fcount) / 100
-    
-    // latest fcount is always circbuf_hun[cbihun_newest-1]
-    // except when cbihun_newest is zero
-    // oldest fcount is always circbuf_hun[cbihun_newest] when buffer is full
-
-    if (cbihun_newest == 0) latfcount64 = circbuf_hun64[100];
-    else latfcount64 = circbuf_hun64[cbihun_newest-1];
-    oldfcount64 = circbuf_hun64[cbihun_newest];
-    
-    avgfhun = double(latfcount64 - oldfcount64)/100.0;
-  }
-  if (cbTho_full) { // we want (latest fcount - oldest fcount) / 1000
-    
-    // latest fcount is always circbuf_tho[cbitho_newest-1]
-    // except when cbitho_newest is zero
-    // oldest fcount is always circbuf_tho[cbitho_newest] when buffer is full
-
-    if (cbitho_newest == 0) latfcount64 = circbuf_tho64[1000];
-    else latfcount64 = circbuf_tho64[cbitho_newest-1];
-    oldfcount64 = circbuf_tho64[cbitho_newest];
-    
-    avgftho = double(latfcount64 - oldfcount64)/1000.0;
-    // oldest fcount is always circbuf_ten[cbiten_newest-2]
-    // except when cbiten_newest is <2 (zero or 1)
-  } 
-  if (cbTth_full) { // we want (latest fcount - oldest fcount) / 10000
-    
-    // latest fcount is always circbuf_tth[cbitth_newest-1]
-    // except when cbitth_newest is zero
-    // oldest fcount is always circbuf_tth[cbitth_newest] when buffer is full
-
-    if (cbitth_newest == 0) latfcount64 = circbuf_tth64[10000];
-    else latfcount64 = circbuf_tth64[cbitth_newest-1];
-    oldfcount64 = circbuf_tth64[cbitth_newest];
-    
-    avgftth = double(latfcount64 - oldfcount64)/10000.0;
-    // oldest fcount is always circbuf_ten[cbiten_newest-2]
-    // except when cbiten_newest is <2 (zero or 1)
-  } 
-} // end of calcavg()
+void calcoavg() {
+  // here we need to calculate the frequency averages oavgften, oavgfhun, oavgftho, etc from the respective cumulative offsets
+  // as seen below, this is pretty simple but takes a while because we are dealing with double fp arithmetic.
+  if (coten_full) oavgften = double(basefreq) + (double(cumulten_offset) / 10.0);
+  if (cohun_full) oavgfhun = double(basefreq) + (double(cumulhun_offset) / 100.0);
+  if (cotho_full) oavgftho = double(basefreq) + (double(cumultho_offset) / 1000.0);
+  if (cotth_full) oavgftth = double(basefreq) + (double(cumultth_offset) / 10000.0);
+  if (co20k_full) oavgf20k = double(basefreq) + (double(cumul20k_offset) / 20000.0);
+} // end of calcoavg()
 
 void flushringbuffers(void) {   // reset all frequency counting data structures to their initial state
-  cbTen_full = false;
-  cbHun_full = false;
-  cbTho_full = false;
-  cbTth_full = false;
-  cbiten_newest = 0;
-  cbihun_newest = 0;
-  cbitho_newest = 0;
-  cbitth_newest = 0;
-  avgften = 0;
-  avgfhun = 0;
-  avgftho = 0;
-  avgftth = 0;
+
   prevfcount64 = 0;
   previousfcount = 0;
 
-  #ifdef GPSDO_OFFSET          // testing: use 8-bit frequency offset data instead of 64-bit counter values
-    cumulten_offset = 0;
-    cumulhun_offset = 0;
-    cumultho_offset = 0; 
-    coffset_newest = 0;
-    coten_full = false;
-    cohun_full = false;
-    cotho_full = false;
-    oavgften=0;
-    oavgfhun=0;
-    oavgftho=0;
-  #endif // OFFSET
+  coffset_newest = 0;
+  
+  cumulten_offset = 0;
+  cumulhun_offset = 0;
+  cumultho_offset = 0; 
+  cumultth_offset = 0;
+  cumul20k_offset = 0;
+   
+  coten_full = false;
+  cohun_full = false;
+  cotho_full = false;
+  cotth_full = false;
+  co20k_full = false;
+  
+  oavgften=0;
+  oavgfhun=0;
+  oavgftho=0;
+  oavgftth=0;
+  oavgf20k=0;
 
   flush_ring_buffers_flag = false; // clear flag
 }
@@ -974,14 +1014,14 @@ void ubxconfig() // based on code by Brad Burleson
   bool gps_set_success = false; // flag setting GPS configuration success
   
   // This UBX command sets stationary mode and confirms it
-  Serial.println("Setting u-Blox M8 receiver navigation mode to stationary: ");
+  Serial.println(F("Setting u-Blox M8 receiver navigation mode to stationary: "));
   uint8_t setNav[] = {
     0xB5, 0x62, 0x06, 0x24, 0x24, 0x00, 0xFF, 0xFF, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00, 0x10, 0x27, 0x00, 0x00, 0x05, 0x00, 0xFA, 0x00, 0xFA, 0x00, 0x64, 0x00, 0x2C, 0x01, 0x00, 0x00, 0x00, 0x00, 0x10, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x49, 0x53};
   while(!gps_set_success)
   {
     sendUBX(setNav, sizeof(setNav)/sizeof(uint8_t));
     Serial.println();
-    Serial.println("UBX command sent, waiting for UBX ACK... ");
+    Serial.println(F("UBX command sent, waiting for UBX ACK... "));
     gps_set_success=getUBX_ACK(setNav);
     if (gps_set_success) 
       Serial.println("Success: UBX ACK received! ");
@@ -1005,7 +1045,7 @@ boolean getUBX_ACK(uint8_t *MSG) {
   uint8_t ackByteID = 0;
   uint8_t ackPacket[10];
   unsigned long startTime = millis();
-  Serial.print(" * Reading ACK response: ");
+  Serial.print(F(" * Reading ACK response: "));
  
   // Construct the expected ACK packet    
   ackPacket[0] = 0xB5;  // header
@@ -1303,7 +1343,7 @@ void docalibration()
   double f1, f2, e1, e2;
   
   // make sure we have a fix and data
-  while (!cbTen_full) delay(1000); // note there is a small chance that we lose PPS during calibration
+  while (!coten_full) delay(1000); // note there is a small chance that we lose PPS during calibration
                                    // resulting in completely wrong calibration value
   
   // measure frequency for Vctl=1.5V
@@ -1321,13 +1361,14 @@ void docalibration()
   
   Serial.println();
   Serial.print(F("f1 (average frequency for Vctl=1.5V): "));
-  f1 = avgften;
+  calcoavg(); // calculate the frequency average
+  f1 = oavgften;
   Serial.print(f1,1);
   Serial.println(F(" Hz"));
   Serial.println();
   
   // make sure we have a fix and data again
-  while (!cbTen_full) delay(1000);
+  while (!coten_full) delay(1000);
   
   // measure frequency for Vctl=2.5V
   Serial.println(F("Measure frequency for Vctl=2.5V"));
@@ -1344,7 +1385,8 @@ void docalibration()
   
   Serial.println();
   Serial.print(F("f2 (average frequency for 2.5V Vctl): "));
-  f2 = avgften;
+  calcoavg(); // calculate the frequency average
+  f2 = oavgften;
   Serial.print(f2,1);
   Serial.println(F(" Hz"));
   Serial.println();
@@ -1386,25 +1428,29 @@ void docalibration()
   #endif // LCD_ST7789 
   
   yellow_led_state = 0;           // turn off yellow LED (handled by 2Hz ISR)
+  flush_ring_buffers_flag = true; // flush the ring buffers (because they now contain invalid data)
   force_calibration_flag = false; // reset flag, calibration done
+  #ifdef GPSDO_PICDIV
+    must_arm_picDIV = true;         // we have a stable PPS and OCXO is close to 10MHz, so arm picDIV
+  #endif // PICDIV
+    
 } // end of GPSDO calibration routine
 
 // ---------------------------------------------------------------------------------------------
 //    Adjust Vctl PWM routine
 // ---------------------------------------------------------------------------------------------
-#ifdef GPSDO_PWM_DAC
 void adjustVctlPWM()
 // This should reach a stable PWM output value / a stable 10000000.00 frequency
 // after an hour or so, and 10000000.000 after eight hours or so
 {
-  // check first if we have the data, then do ultrafine and veryfine frequency
+  // check first if we have the data, then do ultrafine and very fine frequency
   // adjustment, when we are very close
   // ultimately the objective is 10000000.000 over the last 1000s (16min40s)
-  if ((cbTho_full) && (avgftho >= 9999999.990) && (avgftho <= 10000000.010)) {
+  if ((cotho_full) && (oavgftho >= 9999999.990) && (oavgftho <= 10000000.010)) {
    
     // decrease frequency; 1000s based
-    if (avgftho >= 10000000.001) {
-      if (avgftho >= 10000000.005) {
+    if (oavgftho >= 10000000.001) {
+      if (oavgftho >= 10000000.005) {
         // decrease PWM by 5 bits = very fine
         adjusted_PWM_output = adjusted_PWM_output - 5;
       strcpy(trendstr, " vf-");
@@ -1416,8 +1462,8 @@ void adjustVctlPWM()
         }
     }
     // or increase frequency; 1000s based
-    else if (avgftho <= 9999999.999) {
-      if (avgftho <= 9999999.995) {
+    else if (oavgftho <= 9999999.999) {
+      if (oavgftho <= 9999999.995) {
        // increase PWM by 5 bits = very fine
         adjusted_PWM_output = adjusted_PWM_output + 5;     
       strcpy(trendstr, " vf+");
@@ -1431,8 +1477,8 @@ void adjustVctlPWM()
   }
   ///// next check the 100s values in second place because we are too far off
   // decrease frequency; 100s based
-  else if (avgfhun >= 10000000.01) {
-    if (avgfhun >= 10000000.10) {
+  else if (oavgfhun >= 10000000.01) {
+    if (oavgfhun >= 10000000.10) {
       // decrease PWM by 100 bits = coarse
       adjusted_PWM_output = adjusted_PWM_output - 100;
     strcpy(trendstr, " c- ");
@@ -1444,8 +1490,8 @@ void adjustVctlPWM()
       }
   }
   // or increase frequency; 100s based
-  else if (avgfhun <= 9999999.99) {
-    if (avgfhun <= 9999999.90) {
+  else if (oavgfhun <= 9999999.99) {
+    if (oavgfhun <= 9999999.90) {
      // increase PWM by 100 bits = coarse
       adjusted_PWM_output = adjusted_PWM_output + 100;     
     strcpy(trendstr, " c+ ");
@@ -1461,9 +1507,10 @@ void adjustVctlPWM()
   }
   // write the computed value to PWM
   analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
-  must_adjust_DAC = false; // clear flag and we are done 
-  }      // end adjustVctlPWM
-#endif // GPSDO_PWM_DAC
+  must_adjust_DAC = false; // clear flag and we are done
+  
+} // end adjustVctlPWM
+
 
 bool gpsWaitFix(uint16_t waitSecs)
 {
@@ -1530,6 +1577,7 @@ void printGPSDOtab(Stream &Serialx) {       // tab delimited fields suitable for
  *   100s freq. avg. (two decimals) (Hz)
  *   1,000s freq. avg. (three decimals) (Hz)
  *   10,000s freq. avg. (four decimals) (Hz)
+ *   20,000s freq. avg. (five decimals) (Hz)
  *   no. of sats
  *   HDOP (meters)
  *   PWM (16-bit, 1-65535)
@@ -1585,13 +1633,15 @@ void printGPSDOtab(Stream &Serialx) {       // tab delimited fields suitable for
 
   Serialx.print(calcfreq64);     // frequency
   Serialx.print("\t");           // tab
-  Serialx.print(avgften,1);      // avg. 10s
+  Serialx.print(oavgften,1);     // avg. 10s
   Serialx.print("\t");           // tab
-  Serialx.print(avgfhun,2);      // avg. 100s
+  Serialx.print(oavgfhun,2);     // avg. 100s
   Serialx.print("\t");           // tab
-  Serialx.print(avgftho,3);      // avg. 1,000s
+  Serialx.print(oavgftho,3);     // avg. 1,000s
   Serialx.print("\t");           // tab 
-  Serialx.print(avgftth,4);      // avg. 10,000s
+  Serialx.print(oavgftth,4);     // avg. 10,000s
+  Serialx.print("\t");           // tab
+  Serialx.print(oavgf20k,5);     // avg. 20,000s
   Serialx.print("\t");           // tab
 
   Serialx.print(GPSSats);        // sats
@@ -1729,114 +1779,113 @@ void printGPSDOstats(Stream &Serialx) {     // human readable output
   Serialx.println(F("Voltages: "));
 
   float Vctlp = (float(avgpwmVctl)/4096) * 3.3;
-  Serialx.print("VctlPWM: ");
+  Serialx.print(F("VctlPWM: "));
   Serialx.print(Vctlp);
-  Serialx.print("  PWM: ");
-  Serialx.println(adjusted_PWM_output);
+  Serialx.print(F("V"));
+  Serialx.print(F("  PWM: "));
+  Serialx.print(adjusted_PWM_output);
+  if (holdover_mode) Serialx.print(F("  OCXO disciplining: OFF (Holdover Mode)"));
+  else Serialx.print(F("  OCXO disciplining: ACTIVE"));
+  Serialx.println();
 
   #ifdef GPSDO_VCC
-  // Vcc/2 is provided on pin PA0
-  float Vcc = (float(avgVcc)/4096) * 3.3 * 2.0;
-  Serialx.print("Vcc: ");
-  Serialx.println(Vcc);
+    // Vcc/2 is provided on pin PA0
+    float Vcc = (float(avgVcc)/4096) * 3.3 * 2.0;
+    Serialx.print(F("Vcc: "));
+    Serialx.print(Vcc);
+    Serialx.println(F("V"));
   #endif // VCC
 
   #ifdef GPSDO_VDD
-  // internal sensor Vref
-  float Vdd = (1.21 * 4096) / float(avgVdd); // from STM32F411CEU6 datasheet
-  Serialx.print("Vdd: ");                    // Vdd = Vref on Black Pill
-  Serialx.println(Vdd);
+    // internal sensor Vref
+    float Vdd = (1.21 * 4096) / float(avgVdd); // from STM32F411CEU6 datasheet
+    Serialx.print(F("Vdd: "));                    // Vdd = Vref on Black Pill
+    Serialx.print(Vdd);
+    Serialx.println(F("V"));
   #endif // VDD
 
   #ifdef GPSDO_INA219
-  // current sensor for the OCXO
-  Serialx.print(F("OCXO voltage: "));
-  Serialx.print(ina219volt, 2);
-  Serialx.println(F("V"));
-  Serialx.print(F("OCXO current: "));
-  Serialx.print(ina219curr, 0);
-  Serialx.println(F("mA"));
-  #endif // INA219 
+    // current sensor for the OCXO
+    Serialx.print(F("OCXO voltage: "));
+    Serialx.print(ina219volt, 2);
+    Serialx.println(F("V"));
+    Serialx.print(F("OCXO current: "));
+    Serialx.print(ina219curr, 0);
+    Serialx.println(F("mA"));
+  #endif // INA219
+
+  #ifdef GPSDO_LTIC
+    // Vphase available on adc channel 1 (PA1)
+    Serialx.print(F("Vphase: "));
+    Serialx.print(((float(avgVphase)/4096) * 3.3), 2);
+    Serialx.println(F("V"));
+  #endif // LTIC
       
   // OCXO frequency measurements
   Serialx.println();
-  Serialx.println(F("Frequency measurements using 64-bit counter and offsets:"));
-  // temporarily added to check proper 16-bit PWM operation
-  // Serialx.print(F("TIM4 ARR: ")); // should in principle be 48000-1, because 96MHz / 2kHz = 48000
-  // Serialx.println(TIM4->ARR); // and yes, verified
-  // Serialx.print(F("TIM4 ch4 CCR: ")); // in principle, the PWM value x 48000/65536
-  // Serialx.println(TIM4->CCR4); // and also yes, verified
-  // end of temp code
-  // if (overflowErrorFlag) Serialx.println(F("ERROR: overflow "));
-  // Serialx.print(F("Most Significant 32 bits (OverflowCounter): "));
-  // Serialx.println(tim2overflowcounter);
-  // Serialx.print(F("Least Significant 32 bits (TIM2->CCR3): "));
-  // Serialx.println(lsfcount);
+  Serialx.println(F("Frequency measurements:"));
   Serialx.print(F("64-bit Counter: "));
   Serialx.println(fcount64);
   Serialx.print(F("Frequency: "));
-  Serialx.print(calcfreq64);
-  Serialx.println(F(" Hz"));
+  if ((calcfreq64 % 1000000) == 0) { // if we have exact frequency, express it in MHz
+    Serialx.print(calcfreq64 / 1000000);
+    Serialx.println(F(" MHz"));
+  }
+  else { // else not exact frequency, express it in Hz
+    Serialx.print(calcfreq64);
+    Serialx.println(F(" Hz")); 
+  }
   Serialx.println();
-  Serialx.print(F("instant_offset: "));
-  Serialx.print(instant_offset); 
-  Serialx.println();
-  Serialx.print("10s Frequency Avg: ");
-  Serialx.print(avgften,1);
-  Serialx.println(F(" Hz"));
-  Serialx.print("100s Frequency Avg: ");
-  Serialx.print(avgfhun,2);
-  Serialx.println(F(" Hz"));
-  Serialx.print("1,000s Frequency Avg: ");
-  Serialx.print(avgftho,3);
-  Serialx.println(F(" Hz"));
-  Serialx.println();
-  Serialx.print("10s offset Frequency Avg: ");
-  Serialx.print(oavgften,1);
-  Serialx.println(F(" Hz"));
-  Serialx.print(F("cumulten_offset: "));
-  Serialx.print(cumulten_offset); 
-  Serialx.println();
-  Serialx.print("100s offset Frequency Avg: ");
-  Serialx.print(oavgfhun,2);
-  Serialx.println(F(" Hz"));
-  Serialx.print(F("cumulhun_offset: "));
-  Serialx.print(cumulhun_offset); 
-  Serialx.println();
-  Serialx.print("1,000s offset Frequency Avg: ");
-  Serialx.print(oavgftho,3);
-  Serialx.println(F(" Hz"));
-  Serialx.print(F("cumultho_offset: "));
-  Serialx.print(cumultho_offset); 
-  Serialx.println();
-  Serialx.print("10,000s Frequency Avg: ");
-  Serialx.print(avgftth,4);
-  Serialx.println(F(" Hz"));  
+  Serialx.print(F("    10s Frequency Avg: "));
+  if (oavgften == 0) Serialx.println(F(" N/A")); else {
+      Serialx.print(oavgften,1);
+      Serialx.println(F(" Hz"));
+  }
+  Serialx.print(F("   100s Frequency Avg: "));
+  if (oavgfhun == 0) Serialx.println(F(" N/A")); else {
+    Serialx.print(oavgfhun,2);
+    Serialx.println(F(" Hz"));
+  }
+  Serialx.print(F(" 1,000s Frequency Avg: "));
+  if (oavgftho == 0) Serialx.println(F(" N/A")); else {
+    Serialx.print(oavgftho,3);
+    Serialx.println(F(" Hz"));
+  }
+  Serialx.print(F("10,000s Frequency Avg: "));
+  if (oavgftth == 0) Serialx.println(F(" N/A")); else {
+    Serialx.print(oavgftth,4);
+    Serialx.println(F(" Hz"));
+  }
+  Serialx.print(F("20,000s Frequency Avg: "));
+  if (oavgf20k == 0) Serialx.println(F(" N/A")); else {
+    Serialx.print(oavgf20k,5);
+    Serialx.println(F(" Hz"));
+  }  
 
   #if (defined (GPSDO_BMP280_SPI) || defined (GPSDO_BMP280_I2C))
-  // BMP280 measurements
-  Serialx.println();
-  Serialx.print(F("BMP280 Temperature = "));
-  Serialx.print(bmp280temp, 1);
-  Serialx.println(" *C");
-  Serialx.print(F("Pressure = "));
-  Serialx.print((bmp280pres+PressureOffset)/100, 1);
-  Serialx.println(" hPa");
-  Serialx.print(F("Approx altitude = "));
-  Serialx.print(bmp280alti, 1); /* Adjusted to local forecast! */
-  Serialx.println(" m");
+    // BMP280 measurements
+    Serialx.println();
+    Serialx.print(F("BMP280 Temperature = "));
+    Serialx.print(bmp280temp, 1);
+    Serialx.println(" *C");
+    Serialx.print(F("Pressure = "));
+    Serialx.print((bmp280pres+PressureOffset)/100, 1);
+    Serialx.println(" hPa");
+    Serialx.print(F("Approx altitude = "));
+    Serialx.print(bmp280alti, 1); /* Adjusted to local forecast! */
+    Serialx.println(" m");
   #endif // BMP280_SPI
 
   #ifdef GPSDO_AHT10
   // AHT10 measurements
   sensors_event_t humidity, temp;
   aht.getEvent(&humidity, &temp);// populate temp and humidity objects with fresh data
-  Serialx.print("AHT10 Temperature: ");
+  Serialx.print(F("AHT10 Temperature: "));
   Serialx.print(temp.temperature);
-  Serialx.println(" *C");
-  Serialx.print("Humidity: ");
+  Serialx.println(F(" *C"));
+  Serialx.print(F("Humidity: "));
   Serialx.print(humidity.relative_humidity);
-  Serialx.println("% rH");
+  Serialx.println(F("% rH"));
   #endif // AHT10
   
   Serialx.println();
@@ -1847,25 +1896,29 @@ void displayscreen_OLED() // show GPSDO data on OLED display
 {
   float tempfloat;
 
+  // blinking Holdover Mode indicator
+  disp.setCursor(15, 0);
+  if (holdover_mode && ((secs % 2) == 0)) disp.print(F("H")); // indicate Holdover Mode in top right corner
+  else disp.print(F(" "));
   // OCXO frequency
   disp.setCursor(0, 1);
   disp.print(F("F "));
   // display 1s, 10s or 100s value depending on whether data is available
-  if (cbTen_full) {
-    if (cbHun_full) { // if we have data over 100 seconds
-      if (avgfhun < 10000000) {
+  if (coten_full) {
+    if (cohun_full) { // if we have data over 100 seconds
+      if (oavgfhun < 10000000) {
         disp.setCursor(2, 1); disp.print(" ");
       }
       else disp.setCursor(2, 1);
-      disp.print(avgfhun, 2); // to 2 decimal places
+      disp.print(oavgfhun, 2); // to 2 decimal places
       disp.print("Hz ");
     }
     else { // nope, only 10 seconds
-      if (avgften < 10000000) {
+      if (oavgften < 10000000) {
         disp.setCursor(2, 1); disp.print(" ");
       }
       else disp.setCursor(2, 1);
-      disp.print(avgften, 1); // to 1 decimal place
+      disp.print(oavgften, 1); // to 1 decimal place
       disp.print("Hz  ");
     }
   }
@@ -2271,26 +2324,26 @@ void displayscreen_LCD_ST7789() { // show GPSDO data on LCD ST7789 display
   disp_st7789.setTextColor(ST77XX_RED, ST77XX_BLACK);
 
   // display 1s, 10s or 100s value depending on whether data is available
-  if (cbTen_full) {
-    if (cbTho_full) { // if we have data over 1000 seconds
-      if (avgftho < 10000000) {
+  if (coten_full) {
+    if (cotho_full) { // if we have data over 1000 seconds
+      if (oavgftho < 10000000) {
         disp_st7789.print(" ");
       }
-      disp_st7789.print(avgftho, 3); // to 3 decimal places
+      disp_st7789.print(oavgftho, 3); // to 3 decimal places
     }
-      else if (cbHun_full) {
-        if (avgfhun < 10000000) {
+      else if (cohun_full) {
+        if (oavgfhun < 10000000) {
       disp_st7789.print(" ");
           }
-          disp_st7789.print(avgfhun, 2); // to 2 decimal places
+          disp_st7789.print(oavgfhun, 2); // to 2 decimal places
         disp_st7789.print(" ");
     }
 
   else { // nope, only 10 seconds
-    if (avgften < 10000000) {
+    if (oavgften < 10000000) {
       disp_st7789.print(" ");
     }
-    disp_st7789.print(avgften, 1); // to 1 decimal place
+    disp_st7789.print(oavgften, 1); // to 1 decimal place
     disp_st7789.print("  ");
     }
   }
@@ -2354,7 +2407,13 @@ void displayscreen_LCD_ST7789() { // show GPSDO data on LCD ST7789 display
 
 #ifdef GPSDO_TM1637
   void displaytime_TM1637() {
-    int LEDtime = (hours * 100) + mins;
+    int tmhours = hours;
+    if (showlocaltime) {  // calculate and show local time
+      tmhours += timeoffset;
+      if (tmhours >= 24) tmhours -= 24; // handle wraparound cases
+      else if (tmhours < 0) tmhours += 24;
+    }
+    int LEDtime = (tmhours * 100) + mins;
     // Show UTC or local time on TM1637 4-digit LED display and blink colon at 1Hz
     if ((secs%2) == 0) tm1637.showNumberDecEx(LEDtime, 0b11100000, true);
     else tm1637.showNumberDec(LEDtime, true);
@@ -2382,20 +2441,42 @@ void uptimetostrings() {
   }
 } // end of uptimetostrings()
 
-
+// ---------------------------------------------------------------------------------------------
+//    readvphase routine, reads the voltage on the TIC capacitor and averages it
+// --------------------------------------------------------------------------------------------- 
+#ifdef GPSDO_LTIC
+  // read Vphase and discharge 1nF TIC capacitor
+  void readvphase() {
+    adcVphase = analogRead(VphaseInputPin);
+    avgVphase = avg_adcVphase.reading(adcVphase);
+    pinMode(VphaseInputPin, OUTPUT_OPEN_DRAIN);   // setup PA1 as output open drain pin
+    digitalWrite(VphaseInputPin, LOW);            // pulse pin low to discharge capacitor
+    delay(DischargeTime);
+    digitalWrite(VphaseInputPin, HIGH);
+    pinMode(VphaseInputPin, INPUT_ANALOG);        // setup PA1 as analog input pin
+  }
+#endif // LTIC
+    
 // ---------------------------------------------------------------------------------------------
 //    setup routine, prepares the hardware for normal operation
 // --------------------------------------------------------------------------------------------- 
 void setup()
 {
-  // Wait 1 second for things to stabilize
-  delay(1000);
+  // Wait 1/2 second for things to stabilize
+  delay(500);
+
+  #ifdef GPSDO_PICDIV
+    pinMode(picDIVarmPin, OUTPUT);      // pin used to arm the picDIV
+    digitalWrite(picDIVarmPin, HIGH);   // arming done by pulsing this low for > 1s
+  #endif // PICDIV
+
 
   // check if we have a signature in flash
   #ifdef GPSDO_EEPROM
+    sigalreadywritten = true;
     eeprom_buffer_fill(); // fill the buffer with contents of Flash emulating EEPROM
-    for (uint16_t i = 0; i < 6; i++) {
-      if (eeprom_buffered_read_byte(i) != signature[i]) sigalreadywritten = false;
+    for (uint8_t csig = 0; csig < 6; csig++) {
+      if (eeprom_buffered_read_byte(csig) != signature[csig]) sigalreadywritten = false;
     }
   #endif // EEPROM  
 
@@ -2433,23 +2514,31 @@ void setup()
   Serial.println(F(Program_Version));
   Serial.println();
   #ifdef GPSDO_EEPROM
-    if (sigalreadywritten)
+    if (sigalreadywritten) {
       Serial.println(F("STM32 signature found in flash, using stored PWM DAC value"));
+      force_calibration_flag = false; // if using stored PWM value, skip calibration
+    }
     else
-      Serial.println(F("STM32 signature not found in flash, doing calibration"));
+      Serial.println(F("STM32 signature not found in flash"));
   #endif // EEPROM
   Serial.println(F("2Hz interrupt configured"));    
   Serial.println(F("Serial interfaces configured"));    
 
   // setup commands parser
   serial_commands_.SetDefaultHandler(cmd_unrecognized);
-  serial_commands_.AddCommand(&cmd_version_);
-  serial_commands_.AddCommand(&cmd_flush_);
-  serial_commands_.AddCommand(&cmd_calibrate_);
-  serial_commands_.AddCommand(&cmd_tunnel_);
-  serial_commands_.AddCommand(&cmd_setPWM_);
-  serial_commands_.AddCommand(&cmd_rephum_);
-  serial_commands_.AddCommand(&cmd_repdel_);
+  serial_commands_.AddCommand(&cmd_version_);   // prints program name and version
+  serial_commands_.AddCommand(&cmd_flush_);     // flush ring buffer
+  serial_commands_.AddCommand(&cmd_help_);      // print list of commands
+  serial_commands_.AddCommand(&cmd_calibrate_); // perform calibration
+  #ifdef GPSDO_PICDIV
+    serial_commands_.AddCommand(&cmd_armpicdiv_); // arm and sync picDIV
+  #endif // PICDIV
+  serial_commands_.AddCommand(&cmd_tunnel_);    // enter tunnel mode (exits automatically after delay)
+  serial_commands_.AddCommand(&cmd_setPWM_);    // set PWM value manually
+  serial_commands_.AddCommand(&cmd_rephum_);    // human readable reporting (default)
+  serial_commands_.AddCommand(&cmd_repdel_);    // tab delimited reporting (for spreadsheet import)
+  serial_commands_.AddCommand(&cmd_modehold_);  // enter holdover mode, OCXO not disciplined
+  serial_commands_.AddCommand(&cmd_modedisc_);  // exit holdover mode, normal operation
   
   serial_commands_.AddCommand(&cmd_up1_);
   serial_commands_.AddCommand(&cmd_up10_);
@@ -2457,10 +2546,19 @@ void setup()
   serial_commands_.AddCommand(&cmd_dp10_);
 
   #ifdef GPSDO_EEPROM
-    serial_commands_.AddCommand(&cmd_eepromsave_); // register the commands to Store PWM and Recall PWM
-    serial_commands_.AddCommand(&cmd_eepromrecall_);
-    serial_commands_.AddCommand(&cmd_eepromerase_);
-  #endif // EEPROM 
+    serial_commands_.AddCommand(&cmd_eepromsave_);    // sign EEPROM and save PWM value
+    serial_commands_.AddCommand(&cmd_eepromrecall_);  // set PWM value from EEPROM if EEPROM signed
+    serial_commands_.AddCommand(&cmd_eepromerase_);   // delete signature in EEPROM
+  #endif // EEPROM
+
+  #if (defined (GPSDO_BMP280_SPI) || defined (GPSDO_BMP280_I2C))
+    serial_commands_.AddCommand(&cmd_pressoffset_);  // set new Pressure Offset value
+    serial_commands_.AddCommand(&cmd_altitoffset_);  // set new Altitude Offset value
+  #endif // BMP280
+
+  #ifdef GPSDO_TM1637
+    serial_commands_.AddCommand(&cmd_lcltimeoffset_); // set new UTC to local Time Offset value
+  #endif // TM1637
 
   Serial.println(F("Commands parser configured"));    
     
@@ -2651,6 +2749,12 @@ void setup()
   FreqMeasTim->resume();
 
   // Initialize movingAvg objects (note this allocates space on heap) and immediately read 1st value
+  #ifdef GPSDO_LTIC
+    avg_adcVphase.begin();
+    adcVphase = analogRead(VphaseInputPin);
+    avgVphase = avg_adcVphase.reading(adcVphase);
+  # endif // LTIC
+  
   #ifdef GPSDO_VDD
     avg_adcVdd.begin();
     adcVdd = analogRead(AVREF);
@@ -2667,8 +2771,13 @@ void setup()
   pwmVctl = analogRead(VctlPWMInputPin);
   avgpwmVctl = avg_pwmVctl.reading(pwmVctl);
 
+  #ifdef GPSDO_EEPROM
+    if (sigalreadywritten) Serial.println(F("EEPROM signature detected, skipping calibration"));
+    else Serial.println(F("No EEPROM signature"));
+  #endif // EEPROM
+
   startGetFixmS = millis();
-  
+    
   Serial.println();
   Serial.println(F("GPSDO Starting"));
   Serial.println();
@@ -2698,6 +2807,19 @@ void loop()
   if (gpsWaitFix(waitFixTime))    // wait up to waitFixTime seconds for fix, returns true if we have a fix
   { 
     // if we have a GPS fix (implies we have a stable 1PPS pulse from the GPS)
+
+    #ifdef GPSDO_PICDIV
+      if (must_arm_picDIV) {              // sync picDIV if it was requested
+        digitalWrite(picDIVarmPin, LOW);  // pulse pin low to arm picDIV
+        arming_started = millis();
+        must_arm_picDIV = false;   
+      }
+    #endif // PICDIV
+
+    #ifdef GPSDO_LTIC
+      // Before anything else, read Vphase and discharge 1nF TIC capacitor
+      if (must_read_Vphase) readvphase();
+    #endif // LTIC
     
     if (!report_tab_delimited) { // only report fix time when in human readable output format mode
       #ifdef GPSDO_BLUETOOTH
@@ -2705,13 +2827,13 @@ void loop()
         Serial2.println();
         Serial2.print(F("Fix time "));
         Serial2.print(endFixmS - startGetFixmS);
-        Serial2.println(F("mS"));
+        Serial2.println(F("ms"));
       #else
         Serial.println();
         Serial.println();
         Serial.print(F("Fix time "));
         Serial.print(endFixmS - startGetFixmS);
-        Serial.println(F("mS"));
+        Serial.println(F("ms"));
       #endif // BLUETOOTH
     } // !report_tab_delimited
 
@@ -2729,12 +2851,11 @@ void loop()
     year = gps.date.year();
 
 
-    if (must_adjust_DAC && cbHun_full) // in principle just once every 429 seconds, and only if we have valid data
+    if (must_adjust_DAC && cohun_full && !holdover_mode) // in principle just once every 429 seconds,
+                                                         // and only if we have valid data
+                                                         // and only if we are in disciplined mode
     {
-      // use different algorithms for 12-bit I2C DAC and STM32 16-bit PWM DAC
-      #ifdef GPSDO_PWM_DAC
-        adjustVctlPWM();
-      #endif // PWM_DAC
+      adjustVctlPWM();
     }
 
     pwmVctl = analogRead(VctlPWMInputPin);      // read the filtered Vctl voltage output by the PWM
@@ -2753,7 +2874,7 @@ void loop()
     #if (defined (GPSDO_BMP280_SPI) || defined (GPSDO_BMP280_I2C))
       bmp280temp = bmp.readTemperature();              // read bmp280 sensor, save values
       bmp280pres = bmp.readPressure();
-      bmp280alti = bmp.readAltitude();
+      bmp280alti = bmp.readAltitude(AltitudeOffset);
     #endif // BMP280_SPI or BMP280_SPI   
 
     #ifdef GPSDO_INA219
@@ -2764,6 +2885,8 @@ void loop()
     uptimetostrings();            // get updaysstr and uptimestr
 
     yellow_led_state = 0;         // turn off yellow LED
+
+    calcoavg();                   // calculate the frequency averages
 
     if (report_tab_delimited) {   // check what to print and where
       #ifdef GPSDO_BLUETOOTH
@@ -2797,6 +2920,15 @@ void loop()
     #endif // TM1637  
     
     startGetFixmS = millis();    // have a fix, next thing that happens is checking for a fix, so restart timer
+
+    #ifdef GPSDO_PICDIV
+      if (arming_started > 0) {               // if arm picDIV ongoing
+        if ((millis() - arming_started) > picdivArmDelay) {
+          digitalWrite(picDIVarmPin, HIGH);   // end low pulse after > 1s elapsed
+          arming_started = 0;
+        }   
+      }
+   #endif // PICDIV
   }
   else // no GPS fix could be acquired for the last 1/2/5 seconds (see settings)
   {
@@ -2880,6 +3012,9 @@ void loop()
     // no fix or fix lost, we must flush the ring buffers,
     // so raise flush_ring_buffers_flag
     flush_ring_buffers_flag = true;
+    #ifdef GPSDO_PICDIV
+      must_arm_picDIV = true; // resync the picDIV whenever we lose GPS fix
+    #endif // PICDIV
   }
   
 } // end of loop()

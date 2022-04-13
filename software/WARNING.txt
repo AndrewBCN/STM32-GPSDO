@@ -1,0 +1,4 @@
+WARNING!!! ALPHA QUALITY firmware could cause your GPSDO
+and even your computer to suddenly burst into flames!!!
+
+================= TRY AT YOUR OWN RISK =================
