@@ -109,7 +109,7 @@
 #include "GPSDO_algorithms.h"
 const uint8_t default_cla = 0;   // default (startup) control loop algorithm
 uint8_t active_cla = 0;          // active control loop algorithm, can be changed using LA command
-const uint8_t maxalgonumber = 0; // maximum number of control loop algorithms, apart from default
+const uint8_t maxalgonumber = 9; // maximum number of control loop algorithms, not counting algorithm 0
 
 // Hardware options
 // ----------------
