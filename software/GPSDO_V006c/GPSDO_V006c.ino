@@ -2,7 +2,7 @@
   STM32 GPSDO v0.06c by André Balsa, May 2022
   GPLV3 license
   GitHub collaborators: iannezsp (Angelo Iannello)
-  ST7735 SPI LCD display support code contributed by Badwater-Frank
+  ST7735 SPI LCD display support code (experimental) contributed by Badwater-Frank
 
   This program is supplied as is, it is up to the user of the program to decide if the program is
   suitable for the intended purpose and free from errors.
@@ -19,10 +19,13 @@
     - U8g2/u8x8 graphics library, see https://github.com/olikraus/u8g2
     - Adafruit AHTX0
     - Adafruit BMP280
-    - movingAvg library, on STM32 architecture needs a simple patch to avoid warning during compilation
+    - Adafruit INA219
+    - movingAvg library, see https://github.com/JChristensen/movingAvg
     - Color LCD support requires the installation of the Adafruit ST7735 and ST7789 LCD library
       and the Adafruit GFX library.
     - TM1637 LED clock module requires the TM1637 library, see https://github.com/avishorp/TM1637
+    - For the PID controller(s): the Arduino PID library by Brett Beauregard, see https://github.com/br3ttb/Arduino-PID-Library
+    - For the NN MLP controller: the NeuralNetwork library by George Chousos, see https://github.com/GiorgosXou/NeuralNetworks
 
    For commands parsing, uses SerialCommands library found here:
    https://github.com/ppedro74/Arduino-SerialCommands
@@ -44,6 +47,7 @@
     - AO <float value> : Altitude Offset - calibrate atmospheric pressure and altitude sensor
     - AP : arm and sync picDIV
     - TO <number>: set UTC to local time offset, between -23 and 23 (only for TM1637 clock display)
+    - LA <0-9>: switches to Loop Algorithm 0 to 9.
     
 /* Commands to be implemented:
     - S0 to S9 : select log levels ; these only take effect in Human Readable reporting mode
@@ -80,6 +84,7 @@
 //  - Reading TIC measuring phase difference between GPS PPS and picDIV PPS and discharge capacitor
 //  - STM32F401CCU6 Black Pill (lower cost version with less RAM and flash) now fully supported
 //  - TM1637 clock module can show UTC or local time. Local time to UTC time offset can be configured using TO command.
+//  - Control loop algorithm in separate file and LA (Loop Algorithm) command to choose active control loop algorithm.
 
 // TODO
 // 1. Refactor the entire program to make it easier to understand and maintain.
@@ -88,7 +93,6 @@
 // 4. Implement hybrid PLL/FLL control loop algorithm and < 100ns UTC PPS sync.
 // 5. Implement very long period frequency data collection with 10s sampling.
 // 6. Investigate weighed/exponential averaging.
-// 7. Investigate PI or PID control loop algorithms.
 
 #define Program_Name "GPSDO"
 #define Program_Version "v0.06c"
@@ -100,9 +104,12 @@
 #define FastBootMode          // reduce various delays during boot
 #define TunnelModeTesting     // reduce tunnel mode timeout
 
-// Algorithmic options
-// -------------
-// #define GPSDO_PLL             // enable PLL control loop (requires PICDIV and TIC)
+// Control loop algorithms options
+// -------------------------------
+#include "GPSDO_algorithms.h"
+const uint8_t default_cla = 0;   // default (startup) control loop algorithm
+uint8_t active_cla = 0;          // active control loop algorithm, can be changed using LA command
+const uint8_t maxalgonumber = 0; // maximum number of control loop algorithms, apart from default
 
 // Hardware options
 // ----------------
@@ -391,16 +398,19 @@ const uint32_t upperfcount = 10000500;
 // Other frequency measurement variables
 volatile uint64_t fcount64=0, prevfcount64=0, calcfreq64=basefreq; 
 // ATTENTION! must declare 64-bit, not 32-bit variable, because of shift
-volatile uint64_t tim2overflowcounter = 0;  // testing, counts the number of times TIM2 overflows
+volatile uint64_t tim2overflowcounter = 0;  // counts the number of times TIM2 overflows
 volatile bool overflowflag = false;         // flag set by the overflow ISR, reset by the 2Hz ISR
 volatile bool captureflag = false;          // flag set by the capture ISR, reset by the 2Hz ISR
 volatile bool overflowErrorFlag = false;    // flag set if there was an overflow processing error
 
-volatile bool flush_ring_buffers_flag = true;  // indicates ring buffers should be flushed
+volatile bool flush_ring_buffers_flag = true;  // indicates ring buffer should be flushed
 
 // Miscellaneous data structures
 
-//holdover mode / disciplined mode switch
+// PPS counter, increments once per PPS pulse, reset to zero when buffer is flushed
+volatile uint32_t ppscount = 0;               // used by control loop algorithms to determine update periodicity
+
+// holdover mode / disciplined mode switch
 bool holdover_mode = false;                     // always start in disciplined mode
 
 // calibration
@@ -612,6 +622,32 @@ void cmd_setPWM(SerialCommands* sender)
   }
 }
 
+// called for LA (Loop Algorithm) command
+void cmd_setalgo(SerialCommands* sender)
+{
+  int to;
+  char* to_str = sender->Next();
+  if (to_str == NULL) { // if no value was specified, reports current value
+    sender->GetSerial()->print(F("No Loop Algorithm specified, current algorithm is number "));
+    sender->GetSerial()->println(active_cla);
+  }
+  else // check the value that was specified
+  {
+    to = atoi(to_str); // note atoi() returns zero if it cannot convert the string to a valid integer
+    if ((to <= maxalgonumber) && (to >= 0))  // check if the value specified is within bounds
+    {
+      sender->GetSerial()->print(F("Setting Active Loop Algorithm to number ")); // if yes, set the value
+      sender->GetSerial()->println(to);
+      active_cla = to;
+      // should we flush the ring buffer or not, after changing the control loop algorithm?
+    }
+    else // incorrect value specified, print error message
+    {
+      sender->GetSerial()->println(F("Specified Loop Algorithm number invalid, leaving unchanged"));  
+    }  
+  }
+}
+
 // PWM direct control commands (up/down)
 // -------------------------------------
 // called for up1 (increase PWM 1 bit) command
@@ -721,6 +757,7 @@ void cmd_help(SerialCommands* sender)
   sender->GetSerial()->println(F("\t- AO <float value> : Altitude Offset - calibrate atmospheric pressure and altitude sensor"));
   sender->GetSerial()->println(F("\t- AP : arm and sync picDIV"));
   sender->GetSerial()->println(F("\t- TO <number>: set UTC to local time offset, between -23 and 23 (only for TM1637 clock display)"));
+  sender->GetSerial()->println(F("\t- LA <0-9>: switches to Loop Algorithm 0 to 9"));
   sender->GetSerial()->println(F("\t"));
 }
     
@@ -739,6 +776,7 @@ SerialCommand cmd_repdel_("RD", cmd_repdel);       // activate tab delimited rep
 SerialCommand cmd_modehold_("MH", cmd_modehold);   // switch to holdover mode
 SerialCommand cmd_modedisc_("MD", cmd_modedisc);   // switch to disciplined mode
 SerialCommand cmd_setPWM_("SP", cmd_setPWM);       // note this command takes a 16-bit PWM value (1 to 65535) as an argument
+SerialCommand cmd_setalgo_("LA", cmd_setalgo);     // note this command takes a value 0 to 9 as an argument
 
 // 16-bit PWM commands
 SerialCommand cmd_up1_("up1", cmd_up1);
@@ -804,12 +842,13 @@ void Timer_ISR_2Hz(void) // WARNING! Do not attempt I2C communication inside the
       // 2. lsfcount is NOT the same as last time -> process
       if (lsfcount != previousfcount)
       {
+        must_adjust_DAC = true; // set flag every time the frequency counter is updated (in principle, once per second)
+        ppscount++; // increment our PPS count
         // again we must consider two cases
         // 1. lsfcount < previousfcount -> a wraparound has occurred, process
         // 2. lsfcount > previous fcount -> no wraparound processing required
         if (lsfcount < previousfcount)
         {
-          must_adjust_DAC = true; // set flag, once every wraparound / every 429s
           // check wraparound flag, it should be set, if so clear it, otherwise raise error flag
           tim2overflowcounter++;
           if (overflowflag) overflowflag=false; else overflowErrorFlag = true;
@@ -987,6 +1026,8 @@ void flushringbuffers(void) {   // reset all frequency counting data structures 
   oavgftho=0;
   oavgftth=0;
   oavgf20k=0;
+
+  ppscount = 0;
 
   flush_ring_buffers_flag = false; // clear flag
 }
@@ -1435,81 +1476,6 @@ void docalibration()
   #endif // PICDIV
     
 } // end of GPSDO calibration routine
-
-// ---------------------------------------------------------------------------------------------
-//    Adjust Vctl PWM routine
-// ---------------------------------------------------------------------------------------------
-void adjustVctlPWM()
-// This should reach a stable PWM output value / a stable 10000000.00 frequency
-// after an hour or so, and 10000000.000 after eight hours or so
-{
-  // check first if we have the data, then do ultrafine and very fine frequency
-  // adjustment, when we are very close
-  // ultimately the objective is 10000000.000 over the last 1000s (16min40s)
-  if ((cotho_full) && (oavgftho >= 9999999.990) && (oavgftho <= 10000000.010)) {
-   
-    // decrease frequency; 1000s based
-    if (oavgftho >= 10000000.001) {
-      if (oavgftho >= 10000000.005) {
-        // decrease PWM by 5 bits = very fine
-        adjusted_PWM_output = adjusted_PWM_output - 5;
-      strcpy(trendstr, " vf-");
-        }
-    else {
-        // decrease PWM by one bit = ultrafine
-        adjusted_PWM_output = adjusted_PWM_output - 1;
-      strcpy(trendstr, " uf-");
-        }
-    }
-    // or increase frequency; 1000s based
-    else if (oavgftho <= 9999999.999) {
-      if (oavgftho <= 9999999.995) {
-       // increase PWM by 5 bits = very fine
-        adjusted_PWM_output = adjusted_PWM_output + 5;     
-      strcpy(trendstr, " vf+");
-        }
-    else {
-        // increase PWM by one bit = ultrafine
-        adjusted_PWM_output = adjusted_PWM_output + 1;
-      strcpy(trendstr, " uf+");
-      }
-    }
-  }
-  ///// next check the 100s values in second place because we are too far off
-  // decrease frequency; 100s based
-  else if (oavgfhun >= 10000000.01) {
-    if (oavgfhun >= 10000000.10) {
-      // decrease PWM by 100 bits = coarse
-      adjusted_PWM_output = adjusted_PWM_output - 100;
-    strcpy(trendstr, " c- ");
-      }
-    else {
-      // decrease PWM by ten bits = fine
-      adjusted_PWM_output = adjusted_PWM_output - 10;
-    strcpy(trendstr, " f- ");
-      }
-  }
-  // or increase frequency; 100s based
-  else if (oavgfhun <= 9999999.99) {
-    if (oavgfhun <= 9999999.90) {
-     // increase PWM by 100 bits = coarse
-      adjusted_PWM_output = adjusted_PWM_output + 100;     
-    strcpy(trendstr, " c+ ");
-    }
-  else {
-    // increase PWM by ten bits = fine
-      adjusted_PWM_output = adjusted_PWM_output + 10;
-      strcpy(trendstr, " f+ ");
-    }
-  }
-  else {    // here we keep setting, because it is exact 10000000.000MHz
-    strcpy(trendstr, " hit");
-  }
-  // write the computed value to PWM
-  analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
-  must_adjust_DAC = false; // clear flag and we are done
-  
-} // end adjustVctlPWM
 
 
 bool gpsWaitFix(uint16_t waitSecs)
@@ -2465,6 +2431,8 @@ void setup()
   // Wait 1/2 second for things to stabilize
   delay(500);
 
+  active_cla = default_cla;             // set active control loop algorithm to default
+
   #ifdef GPSDO_PICDIV
     pinMode(picDIVarmPin, OUTPUT);      // pin used to arm the picDIV
     digitalWrite(picDIVarmPin, HIGH);   // arming done by pulsing this low for > 1s
@@ -2534,7 +2502,8 @@ void setup()
     serial_commands_.AddCommand(&cmd_armpicdiv_); // arm and sync picDIV
   #endif // PICDIV
   serial_commands_.AddCommand(&cmd_tunnel_);    // enter tunnel mode (exits automatically after delay)
-  serial_commands_.AddCommand(&cmd_setPWM_);    // set PWM value manually
+  serial_commands_.AddCommand(&cmd_setPWM_);    // set 16-bit PWM value manually
+  serial_commands_.AddCommand(&cmd_setalgo_);   // set active control loop algorithm (0 to 9)
   serial_commands_.AddCommand(&cmd_rephum_);    // human readable reporting (default)
   serial_commands_.AddCommand(&cmd_repdel_);    // tab delimited reporting (for spreadsheet import)
   serial_commands_.AddCommand(&cmd_modehold_);  // enter holdover mode, OCXO not disciplined
@@ -2851,11 +2820,14 @@ void loop()
     year = gps.date.year();
 
 
-    if (must_adjust_DAC && cohun_full && !holdover_mode) // in principle just once every 429 seconds,
-                                                         // and only if we have valid data
-                                                         // and only if we are in disciplined mode
-    {
-      adjustVctlPWM();
+    if (must_adjust_DAC && cohun_full && !holdover_mode) { // period depends on algorithm,
+                                                           // only if we have valid data
+                                                           // and only if we are in disciplined mode
+      uint16_t old_adjusted_PWM_output = adjusted_PWM_output;  // save old value
+      adjusted_PWM_output = adjustVctlPWM(old_adjusted_PWM_output, ppscount, active_cla); // compute new value for PWM DAC
+      // write the computed value to PWM DAC only if different from old value
+      if (adjusted_PWM_output != old_adjusted_PWM_output) analogWrite(VctlPWMOutputPin, adjusted_PWM_output);
+      must_adjust_DAC = false; // clear flag since we are done
     }
 
     pwmVctl = analogRead(VctlPWMInputPin);      // read the filtered Vctl voltage output by the PWM
