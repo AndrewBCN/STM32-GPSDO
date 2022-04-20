@@ -68,6 +68,13 @@
   the 16-bit PWM ; this voltage (Vctl) is adjusted once every 429 seconds.
 **********************************************************************************************************/
 
+/**********************************************************************************************************
+ * A quick note about calibrating the BMP pressure / altitude sensor in two simple steps:
+ * 1. Get the atmospheric pressure in hPa from the nearest weather station. Then use the PO command to
+ *    adjust the reported value from the BMP280 until it matches that from the weather station.
+ * 2. Get the altitude for your location from Google Maps or similar service (or the GPS value). Then use
+ *    the AO command to adjust the reported value from the BMP280 until it matches that from Google Maps.
+**********************************************************************************************************/
 // Version v0.05j and later: reporting on USB serial / Bluetooth serial can be toggled between human readable and tab delimited data.
 
 // Version v0.05k and later: EEPROM emulation in Flash allows for saving a 16-bit PWM DAC value (and in the future,
@@ -249,7 +256,20 @@ TinyGPSPlus gps;                                   // create the TinyGPS++ objec
 
 // LCD 1.8" ST7735 160x128 (tested by Badwater-Frank)
 #ifdef GPSDO_LCD_ST7735
-  #include <Adafruit_GFX.h>       // need this adapted for STM32F4xx/F411C: https://github.com/fpistm/Adafruit-GFX-Library/tree/Fix_pin_type
+/**********************************************************************************************************
+  IMPORTANT ST7735 1.8" LCD NOTES: -  The 1.8" SPI LCD may NOT work if STM32 Black Pill pin PA_1 is used.
+  nealix tested this display successfully by using the following pins:
+  LCD Pins     STM32 Black Pill Pins
+  ------              ---------
+  1 GND        any ground pin
+  2 VCC        IMPORTANT:  3.3 Volts ONLY,  NOT 5V
+  3 SCL        Pin PA_5    (STM32 SCLK-1)
+  4 SDA        Pin PA_7    (STM32 MOSI-1)
+  5 RES        Pin PA_3    (We define it below)
+  6 D/C        Pin PA_2    (We define it below)
+  7 CS         Pin PA_4    (We define it below)
+**********************************************************************************************************/
+  #include <Adafruit_GFX.h>
   #include <Adafruit_ST7735.h>
   //#include <Fonts/FreeSansBold18pt7b.h>
   #include <SPI.h>
@@ -258,6 +278,9 @@ TinyGPSPlus gps;                                   // create the TinyGPS++ objec
   #define TFT_RST PA3
   // For 1.44" and 1.8" TFT with ST7735 use:
   Adafruit_ST7735 disp = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+  // Below array is for printing month name on the ST7735 LCD display, using the existing integer month value as an index.
+  #define ARRAYSIZE 13  // index starts from 0, but 12 month names (index 1 to index 12) after that.
+  String MonthText[ARRAYSIZE] = {" ", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
 #endif // LCD_ST7735
 
 // LCD 1.3" ST7789 240x240 (Testing)
@@ -337,7 +360,7 @@ int16_t avgpwmVctl = 0;
 
 #if (defined (GPSDO_BMP280_SPI) || defined (GPSDO_BMP280_I2C))
   float PressureOffset = 1230.0;  // that offset must be calculated for your sensor and local atmospheric pressure
-  float AltitudeOffset = 1000.0;  // that offset must be calculates for your sensor and local altitude
+  float AltitudeOffset = 1.0;     // that offset must be calculates for your sensor and local altitude
   float bmp280temp=0.0, bmp280pres=0.0, bmp280alti=0.0; // read sensor, save values here
 #endif // BMP280
 
@@ -1648,7 +1671,7 @@ void printGPSDOtab(Stream &Serialx) {       // tab delimited fields suitable for
   // BMP280 measurements
     Serialx.print(bmp280temp, 1);
     Serialx.print("\t");
-    Serialx.print((bmp280pres+PressureOffset)/100, 1);
+    Serialx.print(bmp280pres, 1);
   #else
     Serialx.print("0");
     Serialx.print("\t");
@@ -1835,7 +1858,7 @@ void printGPSDOstats(Stream &Serialx) {     // human readable output
     Serialx.print(bmp280temp, 1);
     Serialx.println(" *C");
     Serialx.print(F("Pressure = "));
-    Serialx.print((bmp280pres+PressureOffset)/100, 1);
+    Serialx.print(bmp280pres, 1);
     Serialx.println(" hPa");
     Serialx.print(F("Approx altitude = "));
     Serialx.print(bmp280alti, 1); /* Adjusted to local forecast! */
@@ -2044,7 +2067,7 @@ void displayscreen_LCD_ST7735() // show GPSDO data on LCD ST7735 display
   // BMP280 pressure
   disp.setCursor(90, 72);
   disp.print(F("hPa: "));
-  disp.print(((bmp280pres+PressureOffset)/100), 1);
+  disp.print((bmp280pres, 1);
   #endif // BMP280_SPI
 
   #ifdef GPSDO_VCC
@@ -2143,7 +2166,8 @@ void displayscreen_LCD_ST7735() // show GPSDO data on LCD ST7735 display
   //disp.print(F("Date: "));  
   disp.print(day);
   disp.print(F("."));
-  disp.print(month);
+  // disp.print(month); // display month as number (1 to 12)
+  disp.print( MonthText[month]); // display month as string (JAN to DEC)
   disp.print(F("."));
   disp.print(year);
   
@@ -2248,7 +2272,7 @@ void displayscreen_LCD_ST7789() { // show GPSDO data on LCD ST7789 display
     // BMP280 pressure
     disp_st7789.setCursor(2, 144);
     disp_st7789.print(F("hPa: "));
-    disp_st7789.print(((bmp280pres+PressureOffset)/100), 1);
+    disp_st7789.print(bmp280pres, 1);
   #endif // BMP280_SPI
 
   #ifdef GPSDO_VCC
@@ -2532,9 +2556,15 @@ void setup()
   Serial.println(F("Commands parser configured"));    
     
   #ifdef GPSDO_LCD_ST7735
-    // Setup LCD SPI ST7735 display
-    disp.initR(INITR_BLACKTAB); // 1.8" LCD
-    delay(500);
+    // Setup LCD SPI ST7735 display 
+    //  If needed: Set SP1 alternate pin usage per "#defines" at the top
+    //  SPI.setSCLK(TFT_SCLK);
+    //  SPI.setMOSI(TFT_MOSI);
+    SPI.setClockDivider(SPI_CLOCK_DIV16);
+    SPI.begin();  
+    disp.initR(INITR_GREENTAB);
+    // disp.initR(INITR_BLACKTAB); // 1.8" LCD
+    delay(700);
     disp.fillScreen(ST7735_BLACK);
     disp.setTextColor(ST7735_YELLOW, ST7735_BLACK);  //
     disp.setRotation(1);   // 0..3 max, here we use 90° = landscape
@@ -2844,9 +2874,9 @@ void loop()
     #endif // VDD    
 
     #if (defined (GPSDO_BMP280_SPI) || defined (GPSDO_BMP280_I2C))
-      bmp280temp = bmp.readTemperature();              // read bmp280 sensor, save values
-      bmp280pres = bmp.readPressure();
-      bmp280alti = bmp.readAltitude(AltitudeOffset);
+      bmp280temp = bmp.readTemperature();                       // read bmp280 sensor, save values
+      bmp280pres = (bmp.readPressure()+PressureOffset)/100;     // apply PressureOffset here and calculate value in hPa
+      bmp280alti = bmp.readAltitude(bmp280pres+AltitudeOffset); // apply AltitudeOffset here
     #endif // BMP280_SPI or BMP280_SPI   
 
     #ifdef GPSDO_INA219
