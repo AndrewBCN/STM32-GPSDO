@@ -22,7 +22,8 @@
     - Adafruit INA219
     - movingAvg library, see https://github.com/JChristensen/movingAvg
     - Color LCD support requires the installation of the Adafruit ST7735 and ST7789 LCD library
-      and the Adafruit GFX library.
+      and the Adafruit GFX library. Note one must use a patched version of the Adafruit GFX library,
+      available here: https://github.com/fpistm/Adafruit-GFX-Library/tree/Fix_pin_type
     - TM1637 LED clock module requires the TM1637 library, see https://github.com/avishorp/TM1637
     - For the PID controller(s): the Arduino PID library by Brett Beauregard, see https://github.com/br3ttb/Arduino-PID-Library
     - For the NN MLP controller: the NeuralNetwork library by George Chousos, see https://github.com/GiorgosXou/NeuralNetworks
@@ -75,15 +76,16 @@
  * 2. Get the altitude for your location from Google Maps or similar service (or the GPS value). Then use
  *    the AO command to adjust the reported value from the BMP280 until it matches that from Google Maps.
 **********************************************************************************************************/
+
 // Version v0.05j and later: reporting on USB serial / Bluetooth serial can be toggled between human readable and tab delimited data.
 
 // Version v0.05k and later: EEPROM emulation in Flash allows for saving a 16-bit PWM DAC value (and in the future,
 // other operating parameters). Note that saving the values in EEPROM causes the ring buffer to get flushed.
 
-// Version v0.06b: first implementation of algorithm that uses 8-bit information about frequency offset in 
-// unified ring buffer rather than 64-bit counter data in multiple separate ring buffers.
-
-// Version v0.06c: 
+// Version v0.06c:
+//  - The frequency measurement algorithm now uses 8-bit information about frequency offset in a single unified
+//    ring buffer rather than 64-bit counter data in multiple separate ring buffers. For the 10,000s data set,
+//    this saves 70kB of RAM, and allows using the STM32F401CCU6 Black Pill variant without any firmware changes.
 //  - Holdover Mode / Disciplined Mode commands implemented
 //    Note that in Holdover Mode the PWM DAC value can still be set manually using the SP command
 //  - Pressure Offset (PO) and Altitude Offset (AO) commands implemented
@@ -91,7 +93,7 @@
 //  - Reading TIC measuring phase difference between GPS PPS and picDIV PPS and discharge capacitor
 //  - STM32F401CCU6 Black Pill (lower cost version with less RAM and flash) now fully supported
 //  - TM1637 clock module can show UTC or local time. Local time to UTC time offset can be configured using TO command.
-//  - Control loop algorithm in separate file and LA (Loop Algorithm) command to choose active control loop algorithm.
+//  - Control loop algorithms in separate file and LA (Loop Algorithm) command to choose active control loop algorithm.
 
 // TODO
 // 1. Refactor the entire program to make it easier to understand and maintain.
@@ -100,6 +102,7 @@
 // 4. Implement hybrid PLL/FLL control loop algorithm and < 100ns UTC PPS sync.
 // 5. Implement very long period frequency data collection with 10s sampling.
 // 6. Investigate weighed/exponential averaging.
+// 7. Program control loop algorithms as C++ objects rather than functions.
 
 #define Program_Name "GPSDO"
 #define Program_Version "v0.06c"
@@ -132,12 +135,12 @@ const uint8_t maxalgonumber = 9; // maximum number of control loop algorithms, n
 #define GPSDO_BMP280_I2C      // I2C atmospheric pressure, temperature and altitude sensor
 #define GPSDO_INA219          // INA219 I2C current and voltage sensor
 // #define GPSDO_BLUETOOTH       // Bluetooth serial (HC-06 module)
-#define GPSDO_VCC             // Vcc (nominal 5V) ; reading Vcc requires 1:2 voltage divider to PA0
+#define GPSDO_VCC             // Vcc (nominal 5V) ; reading Vcc requires two resistors 1:2 voltage divider to PA0
 #define GPSDO_VDD             // Vdd (nominal 3.3V) reads VREF internal ADC channel
 #define GPSDO_UBX_CONFIG      // optimize u-blox GPS receiver configuration
 #define GPSDO_VERBOSE_NMEA    // GPS module NMEA stream echoed to USB serial xor Bluetooth serial
-#define GPSDO_PICDIV          // generate a 1.2s arming pulse for the picDIV
-#define GPSDO_TM1637          // TM1637 4-digit LED module
+#define GPSDO_PICDIV          // generate a (longer than) 1.2s arming pulse for the picDIV
+#define GPSDO_TM1637          // TM1637 4-digit clock LED module
 #define GPSDO_LTIC            // read Lars' TIC Vphase 12-bit value on PA1 (ADC channel 1), then discharge TIC capacitor
 #define GPSDO_EEPROM          // enable STM32 buffered EEPROM emulation library
 
@@ -254,28 +257,27 @@ TinyGPSPlus gps;                                   // create the TinyGPS++ objec
   U8X8_SSD1306_128X64_NONAME_HW_I2C disp(U8X8_PIN_NONE);    // use this line for standard 0.96" SSD1306
 #endif // OLED
 
-// LCD 1.8" ST7735 160x128 (tested by Badwater-Frank)
+// LCD 1.8" ST7735 160x128 (tested by Badwater-Frank and Nealix)
 #ifdef GPSDO_LCD_ST7735
 /**********************************************************************************************************
-  IMPORTANT ST7735 1.8" LCD NOTES: -  The 1.8" SPI LCD may NOT work if STM32 Black Pill pin PA_1 is used.
+  IMPORTANT ST7735 1.8" LCD NOTES:
   nealix tested this display successfully by using the following pins:
   LCD Pins     STM32 Black Pill Pins
-  ------              ---------
-  1 GND        any ground pin
-  2 VCC        IMPORTANT:  3.3 Volts ONLY,  NOT 5V
-  3 SCL        Pin PA_5    (STM32 SCLK-1)
-  4 SDA        Pin PA_7    (STM32 MOSI-1)
-  5 RES        Pin PA_3    (We define it below)
-  6 D/C        Pin PA_2    (We define it below)
-  7 CS         Pin PA_4    (We define it below)
+  --------     ---------------------
+  1 GND        Ground
+  2 VCC        WARNING! Some ST7735 LCD modules VCC are 3.3 Volts ONLY, not 3.3V + 5V tolerant
+  3 SCL        Pin PA5     (STM32 SCLK-1)
+  4 SDA        Pin PA7     (STM32 MOSI-1)
+  5 RES        Pin PB15    (We define it below)
+  6 D/C        Pin PB12    (We define it below)
+  7 CS         Pin PB13    (We define it below)
 **********************************************************************************************************/
-  #include <Adafruit_GFX.h>
+  #include <Adafruit_GFX.h> // MUST USE THIS VERSION!! for STM32F4xx/F411C: https://github.com/fpistm/Adafruit-GFX-Library/tree/Fix_pin_type
   #include <Adafruit_ST7735.h>
-  //#include <Fonts/FreeSansBold18pt7b.h>
   #include <SPI.h>
-  #define TFT_DC  PA1             // note this pin assigment conflicts with the original schematic
-  #define TFT_CS  PA2
-  #define TFT_RST PA3
+  #define TFT_DC  PB12             // these pins do not conflict with any other STM32F411 functionality
+  #define TFT_CS  PB13
+  #define TFT_RST PB15
   // For 1.44" and 1.8" TFT with ST7735 use:
   Adafruit_ST7735 disp = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
   // Below array is for printing month name on the ST7735 LCD display, using the existing integer month value as an index.
@@ -1251,11 +1253,15 @@ void doocxowarmup()
           
           #ifdef GPSDO_LCD_ST7735
           disp.fillScreen(ST7735_BLACK);  // display warmup message on LCD ST7735
-          disp.setCursor(0, 0);
-          disp.print(F(Program_Name));
-          disp.print(F(" - "));
+          disp.setTextColor(ST7735_CYAN, ST7735_BLACK);
+          disp.setTextSize(2);
+          disp.setCursor(0, 0);  // X then Y
+          // disp.print(F(Program_Name));
+          disp.print(F("GPSDO "));  // full Program_Name is too long at that font size
           disp.print(F(Program_Version));
           disp.setCursor(0, 16);
+          disp.setTextColor(ST7735_WHITE, ST7735_BLACK);
+          disp.setTextSize(1);
           disp.print(F("OCXO warming up"));
           disp.setCursor(0, 24);
           disp.print(F("Please wait"));
@@ -1345,14 +1351,19 @@ void docalibration()
 
   #ifdef GPSDO_LCD_ST7735
   disp.fillScreen(ST7735_BLACK);  // display calibrating message on LCD ST7735
+  //delay(700);
   disp.setCursor(0, 0);
-  disp.print(F(Program_Name));
-  disp.print(F(" - "));
+  disp.setTextColor(ST7735_CYAN, ST7735_BLACK);
+  disp.setTextSize(2);
+  //disp.print(F(Program_Name));  // Program_Name is too long, use "GPSDO"
+  disp.print(F("GPSDO "));
   disp.print(F(Program_Version));
+  disp.setTextSize(1);
   disp.setCursor(0, 16);
+  disp.setTextColor(ST7735_WHITE, ST7735_BLACK);
   disp.print(F("Calibrating..."));
   disp.setCursor(0, 24);
-  disp.print(F("Please wait"));
+  disp.print(F("Wait a few minutes..."));
   #endif // LCD_ST7735
 
   #ifdef GPSDO_LCD_ST7789
@@ -1774,7 +1785,11 @@ void printGPSDOstats(Stream &Serialx) {     // human readable output
   Serialx.print(F("  PWM: "));
   Serialx.print(adjusted_PWM_output);
   if (holdover_mode) Serialx.print(F("  OCXO disciplining: OFF (Holdover Mode)"));
-  else Serialx.print(F("  OCXO disciplining: ACTIVE"));
+  else {
+    Serialx.print(F("  OCXO disciplining: ACTIVE"));
+    Serialx.print(F("  Trend: ")); // only print the trend if we are disciplining the OCXO
+    Serialx.println(trendstr);
+  }
   Serialx.println();
 
   #ifdef GPSDO_VCC
@@ -1818,11 +1833,11 @@ void printGPSDOstats(Stream &Serialx) {     // human readable output
   Serialx.print(F("Frequency: "));
   if ((calcfreq64 % 1000000) == 0) { // if we have exact frequency, express it in MHz
     Serialx.print(calcfreq64 / 1000000);
-    Serialx.println(F(" MHz"));
+    Serialx.print(F(" MHz"));
   }
   else { // else not exact frequency, express it in Hz
     Serialx.print(calcfreq64);
-    Serialx.println(F(" Hz")); 
+    Serialx.print(F(" Hz")); 
   }
   Serialx.println();
   Serialx.print(F("    10s Frequency Avg: "));
@@ -2067,7 +2082,7 @@ void displayscreen_LCD_ST7735() // show GPSDO data on LCD ST7735 display
   // BMP280 pressure
   disp.setCursor(90, 72);
   disp.print(F("hPa: "));
-  disp.print((bmp280pres, 1);
+  disp.print(bmp280pres, 1);
   #endif // BMP280_SPI
 
   #ifdef GPSDO_VCC
@@ -2103,43 +2118,39 @@ void displayscreen_LCD_ST7735() // show GPSDO data on LCD ST7735 display
   disp.print(F("V"));
   
   // Display Headline and Version
-  disp.setTextColor(ST7735_YELLOW, ST7735_BLACK);
+  disp.setTextColor(ST7735_CYAN, ST7735_BLACK);
   disp.setTextSize(2);
   disp.setCursor(0, 0);
-  disp.print(F("   "));
-  disp.print(F(Program_Name));
-  //
-  disp.setTextSize(1);
-  disp.setCursor(115, 5);
-  disp.setTextColor(ST7735_BLUE, ST7735_BLACK);
+  //disp.print(F(Program_Name)); //Program_Name is too long, use "GPSDO"
+  disp.print(F("GPSDO "));
   disp.print(F(Program_Version));
-  disp.setTextSize(2);
   
   // OCXO frequency
   disp.setCursor(0, 19);
-  disp.setTextColor(ST7735_YELLOW, ST7735_BLACK);
+  disp.setTextSize(2); 
+  disp.setTextColor(ST7735_GREEN, ST7735_BLACK);
 
   // display 1s, 10s or 100s value depending on whether data is available
-  if (cbTen_full) {
-    if (cbTho_full) { // if we have data over 1000 seconds
-      if (avgftho < 10000000) {
+  if (coten_full) {
+    if (cotho_full) { // if we have data over 1000 seconds
+      if (oavgftho < 10000000) {
     disp.print(" ");
         }
-        disp.print(avgftho, 3); // to 3 decimal places
+        disp.print(oavgftho, 3); // to 3 decimal places
       }
-      else if (cbHun_full) {
-        if (avgfhun < 10000000) {
+      else if (cohun_full) {
+        if (oavgfhun < 10000000) {
       disp.print(" ");
           }
-          disp.print(avgfhun, 2); // to 2 decimal places
+          disp.print(oavgfhun, 2); // to 2 decimal places
         disp.print(" ");
     }
 
   else { // nope, only 10 seconds
-      if (avgften < 10000000) {
+      if (oavgften < 10000000) {
     disp.print(" ");
         }
-       disp.print(avgften, 1); // to 1 decimal place
+       disp.print(oavgften, 1); // to 1 decimal place
      disp.print("  ");
     }
   }
@@ -2160,14 +2171,14 @@ void displayscreen_LCD_ST7735() // show GPSDO data on LCD ST7735 display
 
   // clock and date
   disp.setTextSize(2);
-  disp.setTextColor(ST7735_RED, ST7735_BLACK);
+  disp.setTextColor(ST7735_GREEN, ST7735_BLACK);
   // Date
   disp.setCursor(2, 94);
   //disp.print(F("Date: "));  
   disp.print(day);
   disp.print(F("."));
-  // disp.print(month); // display month as number (1 to 12)
-  disp.print( MonthText[month]); // display month as string (JAN to DEC)
+  //disp.print(month);
+  disp.print( MonthText[month]); // Using char array to convert month int number to month name string.
   disp.print(F("."));
   disp.print(year);
   
@@ -2562,21 +2573,20 @@ void setup()
     //  SPI.setMOSI(TFT_MOSI);
     SPI.setClockDivider(SPI_CLOCK_DIV16);
     SPI.begin();  
-    disp.initR(INITR_GREENTAB);
-    // disp.initR(INITR_BLACKTAB); // 1.8" LCD
-    delay(700);
+    disp.initR(INITR_GREENTAB); //Your LCD might need disp.initR(INITR_BLACKTAB); // 1.8" LCD
+    delay(500);
     disp.fillScreen(ST7735_BLACK);
-    disp.setTextColor(ST7735_YELLOW, ST7735_BLACK);  //
     disp.setRotation(1);   // 0..3 max, here we use 90° = landscape
     disp.setFont();
-    disp.setTextSize(3);
+    disp.setTextSize(2);
     // splash screen
-    disp.setCursor(40, 30);
+    disp.setCursor(45, 30);
+    disp.setTextColor(ST7735_GREEN, ST7735_BLACK); 
     disp.print(F(Program_Name));
-    disp.setTextSize(1);
-    disp.setCursor(60, 65);
-    //disp.print(F(" - "));
-    disp.setTextColor(ST7735_WHITE, ST7735_BLACK);
+    // disp.setTextSize(1);
+    disp.setCursor(40, 65);
+    // disp.print(F(" - "));
+    disp.setTextColor(ST7735_GREEN, ST7735_BLACK);
     disp.print(F(Program_Version));
     disp.setTextColor(ST7735_WHITE, ST7735_BLACK);
     disp.setTextSize(1);
@@ -2952,8 +2962,9 @@ void loop()
     #ifdef GPSDO_LCD_ST7735
       disp.fillScreen(ST7735_BLACK);  // display no fix message on ST7735 LCD
       disp.setCursor(0, 0);
-      disp.print(F(Program_Name));
-      disp.print(F(" - "));
+      // disp.print(F(Program_Name)); Program_Name is too long for this LCD, use "GPSDO"
+      disp.print(F("GPSDO "));
+      // disp.print(F(" - "));
       disp.print(F(Program_Version));
       disp.setCursor(0, 8);
       disp.print(F("Wait fix "));
